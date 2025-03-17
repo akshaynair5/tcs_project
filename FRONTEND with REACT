@@ -1,0 +1,123 @@
+import React, { useState } from "react";
+ 
+const App = () => {
+  const [messages, setMessages] = useState([]);
+  const [userInput, setUserInput] = useState("");
+ 
+  const getBotResponse = (userMessage) => {
+    const responses = {
+      "hello": "Hi there! How can I assist you?",
+"how are you": "I'm just a bot, but I'm doing great! What about you?",
+"fine": "ok, any other questions?",
+"ok bye": "Goodbye! Have a nice day!",
+"who are you": "NOT SURE,but I'm a chat-interface created to START this TCS internship!",
+"who created you": "AKSHAY<NAIR>/<REDDY>",
+    };
+ 
+    return responses[userMessage.toLowerCase()] || "I'm not sure how to respond to that.";
+  };
+ 
+  const sendMessage = () => {
+    if (!userInput.trim()) return;
+ 
+    const userMessage = { text: userInput, type: "user" };
+    setMessages((prev) => [...prev, userMessage]);
+ 
+    setTimeout(() => {
+      const botMessage = { text: getBotResponse(userInput), type: "bot" };
+      setMessages((prev) => [...prev, botMessage]);
+    }, 1000);
+ 
+    setUserInput("");
+  };
+ 
+  return (
+    <div style={styles.chatContainer}>
+      <div style={styles.chatBox}>
+        {messages.map((msg, index) => (
+          <div key={index} style={{ ...styles.message, ...(msg.type === "user" ? styles.userMessage : styles.botMessage) }}>
+            {msg.text}
+          </div>
+        ))}
+      </div>
+      <div style={styles.inputContainer}>
+        <input
+          type="text"
+          value={userInput}
+          onChange={(e) => setUserInput(e.target.value)}
+          onKeyPress={(e) => e.key === "Enter" && sendMessage()}
+          placeholder="Type your message..."
+          autoFocus
+          style={styles.input}
+        />
+        <button onClick={sendMessage} style={styles.button}>Send</button>
+      </div>
+    </div>
+  );
+};
+const styles = {
+  chatContainer: {
+    fontFamily: "Arial, sans-serif",
+    display: "flex",
+    justifyContent: "center",
+    alignItems: "center",
+    height: "100vh",
+    backgroundColor: "#f4f7f6",
+  },
+  chatBox: {
+    width: "400px",
+    maxWidth: "100%",
+    height: "500px",
+    backgroundColor: "#ffffff",
+    borderRadius: "10px",
+    boxShadow: "0 2px 10px rgba(0, 0, 0, 0.1)",
+    display: "flex",
+    flexDirection: "column",
+    overflow: "hidden",
+    padding: "15px",
+    overflowY: "auto",
+  },
+  message: {
+    padding: "10px 15px",
+    borderRadius: "15px",
+    maxWidth: "75%",
+    wordWrap: "break-word",
+    marginBottom: "10px",
+  },
+  userMessage: {
+    backgroundColor: "#a8d8e7",
+    alignSelf: "flex-end",
+    borderRadius: "15px 15px 0 15px",
+  },
+  botMessage: {
+    backgroundColor: "#e0e0e0",
+    alignSelf: "flex-start",
+    borderRadius: "15px 15px 15px 0",
+  },
+  inputContainer: {
+    display: "flex",
+    padding: "10px",
+    backgroundColor: "#fff",
+    borderTop: "1px solid #ccc",
+  },
+  input: {
+    width: "80%",
+    padding: "12px",
+    borderRadius: "20px",
+    border: "1px solid #ccc",
+    fontSize: "16px",
+  },
+  button: {
+    padding: "12px 20px",
+    borderRadius: "20px",
+    backgroundColor: "#007bff",
+    color: "white",
+    border: "none",
+    fontSize: "16px",
+    cursor: "pointer",
+    marginLeft: "10px",
+  },
+};
+ 
+export default App;
+ 
