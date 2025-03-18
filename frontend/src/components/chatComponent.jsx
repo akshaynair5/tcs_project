@@ -2,6 +2,7 @@ import { useState } from "react";
 import MessageBox from "./messageBox";
 import { Send } from "lucide-react";
 import ChatInput from "./chatBar";
+import FileUpload from "./fileUpload";
 
 const ChatComponent = () => {
   const [messages, setMessages] = useState([]);
@@ -61,22 +62,23 @@ const ChatComponent = () => {
         )}
       </div>
 
-      <div className="flex items-center gap-2 p-3 bg-white border-t border-gray-300">
+      <div className="flex items-center gap-2 p-3 bg-transparent">
         <input
           type="text"
-          className="flex-1 p-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-          placeholder="Type your message..."
+          className="flex-1 p-2 border rounded-lg focus:outline-none focus:ring-1 focus:ring-gray-500"
+          placeholder="Type your query..."
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && handleSend()}
         />
         <button
-          className="p-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition"
+          className="p-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition"
           onClick={handleSend}
           disabled={loading}
         >
           <Send size={20} />
         </button>
+        <FileUpload />
       </div>
       {/* <ChatInput onSend={handleSend} /> */}
     </div>
