@@ -37,8 +37,8 @@ def save_faiss_index():
     print("✅ FAISS index and documents saved successfully.")
 
 def load_faiss_index():
-    """Loads FAISS index and associated documents."""
     global index, documents
+    
     if os.path.exists(FAISS_INDEX_PATH):
         index = faiss.read_index(FAISS_INDEX_PATH)
         print(f"📂 Loaded FAISS index with {index.ntotal} vectors.")
@@ -48,9 +48,13 @@ def load_faiss_index():
 
     if os.path.exists(DOCUMENTS_PATH):
         with open(DOCUMENTS_PATH, "rb") as f:
-            documents = pickle.load(f)
+            try:
+                documents = pickle.load(f)
+            except Exception as e:
+                print("⚠️ Error loading documents.pkl:", str(e))
+                documents = []
         print(f"📂 Loaded {len(documents)} documents.")
-        print("🔍 Sample Document:", documents[:2])  # Print first 2 docs for debugging
+        print("🔍 Sample Document:", documents[:2])  # Debugging
     else:
         print("⚠️ No documents file found. Initializing an empty list and saving it.")
         documents = []

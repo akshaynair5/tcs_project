@@ -7,17 +7,17 @@ import pickle
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))  
 
-VECTOR_STORE_DIR = os.path.join(BASE_DIR, "vector_store")  # Now correctly inside backend/app/vector_store
-FAISS_INDEX_PATH = os.path.join(VECTOR_STORE_DIR, "faiss_index.bin")  # FAISS index path
-DOCUMENTS_PATH = os.path.join(VECTOR_STORE_DIR, "documents.pkl")  # File to store document texts
-# Ensure vector_store directory exists
+VECTOR_STORE_DIR = os.path.join(BASE_DIR, "vector_store")  
+FAISS_INDEX_PATH = os.path.join(VECTOR_STORE_DIR, "faiss_index.bin") 
+DOCUMENTS_PATH = os.path.join(VECTOR_STORE_DIR, "documents.pkl")
+
 os.makedirs(VECTOR_STORE_DIR, exist_ok=True)
 
-# Initialize embedding model
+
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-# Load or create FAISS index
-dimension = 384  # SentenceTransformer output size
+
+dimension = 384  
 
 def load_faiss_index():
     """Loads the FAISS index from disk, or creates a new one if missing."""
@@ -31,7 +31,7 @@ def load_faiss_index():
 
 index = load_faiss_index()
 
-documents = []  # Stores text
+documents = []
 
 def extract_text_from_pdf(pdf_path):
     """Extracts text from a given PDF and prints it."""
@@ -40,7 +40,7 @@ def extract_text_from_pdf(pdf_path):
         for page in doc:
             text += page.get_text("text") + "\n"
     
-    # Print extracted text for debugging
+
     print("Extracted Text from PDF:\n", text)
 
     return text
@@ -51,15 +51,12 @@ def store_text_embedding(text):
     
     documents.append(text)
 
-    # Save documents list
     with open(DOCUMENTS_PATH, "wb") as f:
         pickle.dump(documents, f)
 
-    # Generate embedding and store in FAISS index
     embedding = embedding_model.encode([text])
     index.add(np.array(embedding, dtype=np.float32))
 
-    # Save FAISS index
     faiss.write_index(index, FAISS_INDEX_PATH)
-    print("✅ FAISS index and documents saved successfully.")
+    print("FAISS index and documents saved successfully.")
 
