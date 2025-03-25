@@ -4,30 +4,52 @@ import numpy as np
 import faiss
 import pickle
 from sentence_transformers import SentenceTransformer
+from dotenv import load_dotenv
 import os
+from pinecone import Pinecone, ServerlessSpec
+import time
 
-# Define paths inside the /app directory
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))  # Get the directory where this script is located
-VECTOR_STORE_DIR = os.path.join(BASE_DIR, "vector_store")  # Now correctly inside backend/app/vector_store
+load_dotenv()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__)) 
+VECTOR_STORE_DIR = os.path.join(BASE_DIR, "vector_store")  
 FAISS_INDEX_PATH = os.path.join(VECTOR_STORE_DIR, "faiss_index.bin")  # FAISS index path
-DOCUMENTS_PATH = os.path.join(VECTOR_STORE_DIR, "documents.pkl")  # File to store document texts
-# Ensure vector_store directory exists
+DOCUMENTS_PATH = os.path.join(VECTOR_STORE_DIR, "documents.pkl") 
+
 os.makedirs(VECTOR_STORE_DIR, exist_ok=True)
 
-# Load embedding model
+PINECONE_API_KEY = os.getenv("PINECONE_SECRET_KEY")
+print(f"🔑 Pinecone API key: {PINECONE_API_KEY}")
+INDEX_NAME = "insurance-data"
+
+# ✅ Initialize Pinecone client
+pc = Pinecone(api_key=PINECONE_API_KEY)
+
+# ✅ Create index if it doesn’t exist
+if INDEX_NAME not in pc.list_indexes().names():
+    pc.create_index(
+        name=INDEX_NAME,
+        dimension=384,  # Matches SentenceTransformer output size
+        metric="cosine",
+        spec=ServerlessSpec(cloud="aws", region="us-east-1")
+    )
+    time.sleep(5)  # Wait for index to be ready
+
+# ✅ Connect to index
+pinecone_index = pc.Index(INDEX_NAME)
+
+
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-# Check if FAISS index file exists, otherwise create a new one
-d = 384  # Dimension of embeddings (for all-MiniLM-L6-v2)
+
+d = 384 
 if not os.path.exists(FAISS_INDEX_PATH):
     print("FAISS index file not found. Creating a new one...")
-    index = faiss.IndexFlatL2(d)  # Create an empty FAISS index
-    faiss.write_index(index, FAISS_INDEX_PATH)  # Save new index to file
+    index = faiss.IndexFlatL2(d) 
+    faiss.write_index(index, FAISS_INDEX_PATH)  
 else:
-    index = faiss.read_index(FAISS_INDEX_PATH)  # Load existing FAISS index
+    index = faiss.read_index(FAISS_INDEX_PATH)  
 
-# Store document texts in a list (for retrieving original content)
-documents = []  # Load this from wherever you're storing raw PDF text
+documents = []  
 
 def save_faiss_index():
     """Saves FAISS index and associated documents."""
@@ -41,9 +63,9 @@ def load_faiss_index():
     
     if os.path.exists(FAISS_INDEX_PATH):
         index = faiss.read_index(FAISS_INDEX_PATH)
-        print(f"📂 Loaded FAISS index with {index.ntotal} vectors.")
+        print(f"Loaded FAISS index with {index.ntotal} vectors.")
     else:
-        print("⚠️ FAISS index file not found. Creating a new one...")
+        print("FAISS index file not found. Creating a new one...")
         index = faiss.IndexFlatL2(d)
 
     if os.path.exists(DOCUMENTS_PATH):
@@ -53,8 +75,8 @@ def load_faiss_index():
             except Exception as e:
                 print("⚠️ Error loading documents.pkl:", str(e))
                 documents = []
-        print(f"📂 Loaded {len(documents)} documents.")
-        print("🔍 Sample Document:", documents[:2])  # Debugging
+        print(f"Loaded {len(documents)} documents.")
+        print("Sample Document:", documents[:2])  # Debugging
     else:
         print("⚠️ No documents file found. Initializing an empty list and saving it.")
         documents = []
@@ -62,7 +84,6 @@ def load_faiss_index():
             pickle.dump(documents, f)
 
 
-# Load FAISS index and documents at startup
 load_faiss_index()
 
 def add_documents_to_index(new_documents):
@@ -74,28 +95,23 @@ def add_documents_to_index(new_documents):
         return
     
     new_embeddings = np.array([embedding_model.encode(doc) for doc in new_documents], dtype=np.float32)
-    
-    # Ensure FAISS index is initialized
+ 
     if index.ntotal == 0:
         index = faiss.IndexFlatL2(d)
     
-    index.add(new_embeddings)  # Add new embeddings to FAISS
-    documents.extend(new_documents)  # Store raw text for retrieval
-    faiss.write_index(index, FAISS_INDEX_PATH)  # Save index
+    index.add(new_embeddings) 
+    documents.extend(new_documents) 
+    faiss.write_index(index, FAISS_INDEX_PATH)
     print(f"Added {len(new_documents)} new documents to FAISS index.")
-
-def clean_response(response):
-    """Removes HTML-like tags from the response."""
-    return re.sub(r'<.*?>', '', response)
 
 def search_context(question, top_k=2):
     """Finds the most relevant PDF text for the question."""
     question_embedding = np.array(embedding_model.encode([question]), dtype=np.float32)
 
-    # Debugging information
-    print("🔹 Question Vector Shape:", question_embedding.shape)
-    print("🔹 Documents Available:", len(documents))
-    print("🔹 FAISS Index Size (ntotal):", index.ntotal)
+    # Debugging
+    print(" Question Vector Shape:", question_embedding.shape)
+    print("Documents Available:", len(documents))
+    print(" FAISS Index Size (ntotal):", index.ntotal)
 
     if index.ntotal == 0:
         return "No relevant context found (empty index)."
@@ -103,8 +119,8 @@ def search_context(question, top_k=2):
     # Perform similarity search in FAISS
     distances, indices = index.search(question_embedding, top_k)
     
-    print("🔹 Search Indices:", indices)
-    print("🔹 Search Distances:", distances)
+    print("Search Indices:", indices)
+    print("Search Distances:", distances)
     
     if indices is None or indices.size == 0 or np.all(indices == -1):
         return "No relevant context found."
@@ -113,23 +129,69 @@ def search_context(question, top_k=2):
     relevant_texts = [documents[i] for i in indices[0] if 0 <= i < len(documents)]
     return "\n".join(relevant_texts) if relevant_texts else "No relevant context found."
 
-def generate_response(question):
-    """Generates a response using Ollama, with PDF content as context."""
-    context = search_context(question)
-    prompt = f"Based on the following context, provide a direct and concise answer.\n\nContext: {context}\n\nQuestion: {question}\n\nAnswer concisely:"
+def remove_think_tags(text):
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
-    try:
-        result = subprocess.run(
-            ['ollama', 'run', 'deepseek-r1:1.5b', prompt],
-            capture_output=True,
-            text=True,
-            check=True,
-            encoding='utf-8'  # Fix UnicodeDecodeError
-        )
-        return clean_response(result.stdout)
-    except subprocess.CalledProcessError as e:
-        return f"Command failed with error: {e.stderr}"
-    except FileNotFoundError:
-        return "Error: 'ollama' command not found."
-    except Exception as e:
-        return f"Error: {str(e)}"
+# def generate_response(question):
+#     """Generates a response using Ollama, with PDF content as context."""
+#     context = search_context(question)
+#     prompt = f"Based on the following context, provide a direct and concise answer.\n\nContext: {context}\n\nQuestion: {question}\n\n"
+
+#     try:
+#         result = subprocess.run(
+#             ['ollama', 'run', 'deepseek-r1:1.5b', prompt],
+#             capture_output=True,
+#             text=True,
+#             check=True,
+#             encoding='utf-8' 
+#         )
+#         return remove_think_tags(result.stdout)
+#     except subprocess.CalledProcessError as e:
+#         return f"Command failed with error: {e.stderr}"
+#     except FileNotFoundError:
+#         return "Error: 'ollama' command not found."
+#     except Exception as e:
+#         return f"Error: {str(e)}"
+def search_pinecone(question, top_k=5):
+    """Search Pinecone for relevant context using embeddings."""
+    question_embedding = embedding_model.encode(question).tolist()
+    
+    # Query Pinecone
+    response = pinecone_index.query(vector=question_embedding, top_k=top_k, include_metadata=True)
+
+    if response and "matches" in response:
+        return " ".join(match["metadata"]["text"] for match in response["matches"] if "text" in match["metadata"])
+    return ""
+
+def generate_response(question):
+    """Generates a response using Ollama with and without Pinecone context."""
+    context = search_pinecone(question)
+    prompt_with_context = f"Based on the following context, provide a direct and concise answer.\n\nContext: {context}\n\nQuestion: {question}\n\n"
+    prompt_without_context = f"Provide a direct and concise answer.\n\nQuestion: {question}\n\n"
+
+    def run_ollama(prompt):
+        """Helper function to run Ollama and fetch a response."""
+        try:
+            result = subprocess.run(
+                ['ollama', 'run', 'deepseek-r1:1.5b', prompt],
+                capture_output=True,
+                text=True,
+                check=True,
+                encoding='utf-8'
+            )
+            return result.stdout.strip()
+        except subprocess.CalledProcessError as e:
+            return f"Command failed with error: {e.stderr}"
+        except FileNotFoundError:
+            return "Error: 'ollama' command not found."
+        except Exception as e:
+            return f"Error: {str(e)}"
+    
+    # Get responses
+    response_with_context = remove_think_tags(run_ollama(prompt_with_context)) if context else "No relevant context found."
+    response_without_context = remove_think_tags(run_ollama(prompt_without_context))
+
+    return {
+        "response_with_context": response_with_context,
+        "response_without_context": response_without_context
+    }
