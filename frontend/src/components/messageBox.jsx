@@ -19,7 +19,11 @@ const MessageBox = ({ content, role }) => {
           role === "user" ? "bg-blue-500 text-white" : "bg-gray-200 text-black"
         }`}
       >
-        {messageText}
+        {
+          role === "assistant" && typeof content === "object"
+          ? content.response_with_context || "No response available"
+          : content
+        }
       </div>
     </div>
   );

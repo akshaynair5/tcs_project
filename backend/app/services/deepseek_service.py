@@ -24,16 +24,6 @@ INDEX_NAME = "insurance-data"
 # ✅ Initialize Pinecone client
 pc = Pinecone(api_key=PINECONE_API_KEY)
 
-# ✅ Create index if it doesn’t exist
-if INDEX_NAME not in pc.list_indexes().names():
-    pc.create_index(
-        name=INDEX_NAME,
-        dimension=384,  # Matches SentenceTransformer output size
-        metric="cosine",
-        spec=ServerlessSpec(cloud="aws", region="us-east-1")
-    )
-    time.sleep(5)  # Wait for index to be ready
-
 # ✅ Connect to index
 pinecone_index = pc.Index(INDEX_NAME)
 
@@ -135,7 +125,7 @@ def remove_think_tags(text):
 # def generate_response(question):
 #     """Generates a response using Ollama, with PDF content as context."""
 #     context = search_context(question)
-#     prompt = f"Based on the following context, provide a direct and concise answer.\n\nContext: {context}\n\nQuestion: {question}\n\n"
+#     prompt = f"Based on the following context, provide a direct and concise answer.\n\nQuestion: {question}\n\n"
 
 #     try:
 #         result = subprocess.run(
@@ -145,13 +135,29 @@ def remove_think_tags(text):
 #             check=True,
 #             encoding='utf-8' 
 #         )
-#         return remove_think_tags(result.stdout)
+#         return {"response_with_context":remove_think_tags(result.stdout)}
 #     except subprocess.CalledProcessError as e:
 #         return f"Command failed with error: {e.stderr}"
 #     except FileNotFoundError:
 #         return "Error: 'ollama' command not found."
 #     except Exception as e:
 #         return f"Error: {str(e)}"
+
+def generate_response(question):
+    """Generates a response using Ollama with and without Pinecone context."""
+    context = search_pinecone(question)
+    prompt_with_context = f"Based on the following context, provide a direct and concise answer.\n\nContext: {context}\n\nQuestion: {question}\n\n"
+    prompt_without_context = f"Provide a direct and concise answer.\n\nQuestion: {question}\n\n"
+    
+    # Get responses
+    response_with_context = remove_think_tags(run_ollama(prompt_with_context)) if context else "No relevant context found."
+    response_without_context = remove_think_tags(run_ollama(prompt_without_context))
+
+    return {
+        "response_with_context": response_with_context,
+        "response_without_context": response_without_context
+    }
+
 def search_pinecone(question, top_k=5):
     """Search Pinecone for relevant context using embeddings."""
     question_embedding = embedding_model.encode(question).tolist()
@@ -163,13 +169,7 @@ def search_pinecone(question, top_k=5):
         return " ".join(match["metadata"]["text"] for match in response["matches"] if "text" in match["metadata"])
     return ""
 
-def generate_response(question):
-    """Generates a response using Ollama with and without Pinecone context."""
-    context = search_pinecone(question)
-    prompt_with_context = f"Based on the following context, provide a direct and concise answer.\n\nContext: {context}\n\nQuestion: {question}\n\n"
-    prompt_without_context = f"Provide a direct and concise answer.\n\nQuestion: {question}\n\n"
-
-    def run_ollama(prompt):
+def run_ollama(prompt):
         """Helper function to run Ollama and fetch a response."""
         try:
             result = subprocess.run(
@@ -186,12 +186,3 @@ def generate_response(question):
             return "Error: 'ollama' command not found."
         except Exception as e:
             return f"Error: {str(e)}"
-    
-    # Get responses
-    response_with_context = remove_think_tags(run_ollama(prompt_with_context)) if context else "No relevant context found."
-    response_without_context = remove_think_tags(run_ollama(prompt_without_context))
-
-    return {
-        "response_with_context": response_with_context,
-        "response_without_context": response_without_context
-    }
