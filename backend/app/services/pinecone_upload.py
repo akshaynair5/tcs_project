@@ -16,14 +16,14 @@ INDEX_NAME = "insurance-data"
 pc = Pinecone(api_key=PINECONE_API_KEY)
 
 # ✅ Create index if it doesn’t exist
-if INDEX_NAME not in pc.list_indexes().names():
-    pc.create_index(
-        name=INDEX_NAME,
-        dimension=384,  # Matches SentenceTransformer output size
-        metric="cosine",
-        spec=ServerlessSpec(cloud="aws", region="us-east-1")
-    )
-    time.sleep(5)  # Wait for index to be ready
+# if INDEX_NAME not in pc.list_indexes().names():
+#     pc.create_index(
+#         name=INDEX_NAME,
+#         dimension=384,  # Matches SentenceTransformer output size
+#         metric="cosine",
+#         spec=ServerlessSpec(cloud="aws", region="us-east-1")
+#     )
+#     time.sleep(5)  # Wait for index to be ready
 
 # ✅ Connect to index
 pinecone_index = pc.Index(INDEX_NAME)

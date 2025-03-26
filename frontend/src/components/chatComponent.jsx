@@ -35,6 +35,7 @@ const ChatComponent = () => {
       });
   
       // Fix: Ensure assistant response structure matches what `MessageBox` expects
+      console.log(data.answer)
       const assistantMessage = { content: data.answer, role: "ai_assistant" };
       setMessages((prevMessages) => [...prevMessages, assistantMessage]);
     } catch (error) {
