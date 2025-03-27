@@ -76,7 +76,7 @@ const ChatSidebar = () => {
                                         : "No messages"}
                                 </span>
                             </div>
-                            <p className="text-gray-300 text-sm truncate">{chat.lastMessage.response_with_context? chat.lastMessage.response_with_context : chat.lastMessage || "Start chatting..."}</p>
+                            <p className="text-gray-300 text-sm truncate">{chat.lastMessage?.response_with_context? chat.lastMessage.response_with_context : chat.lastMessage || "Start chatting..."}</p>
                         </li>
                     ))
                 ) : (

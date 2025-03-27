@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import os
 from pinecone import Pinecone, ServerlessSpec
 import time
+from neo4j import GraphDatabase
 
 load_dotenv()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__)) 
@@ -18,8 +19,13 @@ DOCUMENTS_PATH = os.path.join(VECTOR_STORE_DIR, "documents.pkl")
 os.makedirs(VECTOR_STORE_DIR, exist_ok=True)
 
 PINECONE_API_KEY = os.getenv("PINECONE_SECRET_KEY")
-print(f"🔑 Pinecone API key: {PINECONE_API_KEY}")
+NEO4J_URI = os.getenv("NEO4J_URI")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
+NEO4J_USER = os.getenv("NEO4J_USERNAME")
+
 INDEX_NAME = "insurance-data"
+
+driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
 # ✅ Initialize Pinecone client
 pc = Pinecone(api_key=PINECONE_API_KEY)
@@ -76,44 +82,67 @@ def load_faiss_index():
 
 load_faiss_index()
 
-def add_documents_to_index(new_documents):
-    """Encodes new documents and adds them to FAISS index."""
-    global index, documents
+# def add_documents_to_index(new_documents):
+#     """Encodes new documents and adds them to FAISS index."""
+#     global index, documents
     
-    if not new_documents:
-        print("No new documents to add.")
-        return
+#     if not new_documents:
+#         print("No new documents to add.")
+#         return
     
-    new_embeddings = np.array([embedding_model.encode(doc) for doc in new_documents], dtype=np.float32)
+#     new_embeddings = np.array([embedding_model.encode(doc) for doc in new_documents], dtype=np.float32)
  
-    if index.ntotal == 0:
-        index = faiss.IndexFlatL2(d)
+#     if index.ntotal == 0:
+#         index = faiss.IndexFlatL2(d)
     
-    index.add(new_embeddings) 
-    documents.extend(new_documents) 
-    faiss.write_index(index, FAISS_INDEX_PATH)
-    print(f"Added {len(new_documents)} new documents to FAISS index.")
+#     index.add(new_embeddings) 
+#     documents.extend(new_documents) 
+#     faiss.write_index(index, FAISS_INDEX_PATH)
+#     print(f"Added {len(new_documents)} new documents to FAISS index.")
 
-def search_context(question, top_k=2):
-    """Finds the most relevant PDF text for the question."""
-    question_embedding = np.array(embedding_model.encode([question]), dtype=np.float32)
+def add_documents_to_graph(documents):
+    """Inserts extracted PDF text as nodes and relationships in Neo4j."""
+    with driver.session() as session:
+        for doc in documents:
+            query = """
+            MERGE (d:Document {text: $text})
+            RETURN d
+            """
+            session.run(query, text=doc)
+    print(f"Added {len(documents)} documents to Neo4j.")
 
-    # Debugging
-    print(" Question Vector Shape:", question_embedding.shape)
-    print("Documents Available:", len(documents))
-    print(" FAISS Index Size (ntotal):", index.ntotal)
+def search_context(question, top_k=3):
+    """Query Neo4j for relevant context based on the question."""
+    with driver.session() as session:
+        query = """
+        MATCH (q:Question {text: $question})-[:RELATED_TO]->(context)
+        RETURN context.text LIMIT $top_k
+        """
+        result = session.run(query, question=question, top_k=top_k)
+        contexts = [record["context.text"] for record in result]
+        
+        return "\n".join(contexts) if contexts else "No relevant context found."
 
-    if index.ntotal == 0:
-        return "No relevant context found (empty index)."
+# def search_context(question, top_k=2):
+#     """Finds the most relevant PDF text for the question."""
+#     question_embedding = np.array(embedding_model.encode([question]), dtype=np.float32)
 
-    # Perform similarity search in FAISS
-    distances, indices = index.search(question_embedding, top_k)
+#     # Debugging
+#     print(" Question Vector Shape:", question_embedding.shape)
+#     print("Documents Available:", len(documents))
+#     print(" FAISS Index Size (ntotal):", index.ntotal)
+
+#     if index.ntotal == 0:
+#         return "No relevant context found (empty index)."
+
+#     # Perform similarity search in FAISS
+#     distances, indices = index.search(question_embedding, top_k)
     
-    print("Search Indices:", indices)
-    print("Search Distances:", distances)
+#     print("Search Indices:", indices)
+#     print("Search Distances:", distances)
     
-    if indices is None or indices.size == 0 or np.all(indices == -1):
-        return "No relevant context found."
+#     if indices is None or indices.size == 0 or np.all(indices == -1):
+#         return "No relevant context found."
 
     # Retrieve top-matching texts
     relevant_texts = [documents[i] for i in indices[0] if 0 <= i < len(documents)]
@@ -122,26 +151,6 @@ def search_context(question, top_k=2):
 def remove_think_tags(text):
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
-# def generate_response(question):
-#     """Generates a response using Ollama, with PDF content as context."""
-#     context = search_context(question)
-#     prompt = f"Based on the following context, provide a direct and concise answer.\n\nQuestion: {question}\n\n"
-
-#     try:
-#         result = subprocess.run(
-#             ['ollama', 'run', 'deepseek-r1:1.5b', prompt],
-#             capture_output=True,
-#             text=True,
-#             check=True,
-#             encoding='utf-8' 
-#         )
-#         return {"response_with_context":remove_think_tags(result.stdout)}
-#     except subprocess.CalledProcessError as e:
-#         return f"Command failed with error: {e.stderr}"
-#     except FileNotFoundError:
-#         return "Error: 'ollama' command not found."
-#     except Exception as e:
-#         return f"Error: {str(e)}"
 
 def generate_response(question):
     """Generates a response using Ollama with and without Pinecone context."""
@@ -186,3 +195,24 @@ def run_ollama(prompt):
             return "Error: 'ollama' command not found."
         except Exception as e:
             return f"Error: {str(e)}"
+
+# def generate_response(question):
+#     """Generates a response using Ollama, with PDF content as context."""
+#     context = search_context(question)
+#     prompt = f"Based on the following context, provide a direct and concise answer.\n\nQuestion: {question}\n\n"
+
+#     try:
+#         result = subprocess.run(
+#             ['ollama', 'run', 'deepseek-r1:1.5b', prompt],
+#             capture_output=True,
+#             text=True,
+#             check=True,
+#             encoding='utf-8' 
+#         )
+#         return {"response_with_context":remove_think_tags(result.stdout)}
+#     except subprocess.CalledProcessError as e:
+#         return f"Command failed with error: {e.stderr}"
+#     except FileNotFoundError:
+#         return "Error: 'ollama' command not found."
+#     except Exception as e:
+#         return f"Error: {str(e)}"
