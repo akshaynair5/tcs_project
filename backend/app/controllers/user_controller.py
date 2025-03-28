@@ -69,7 +69,6 @@ class UserController:
             return response, status_code  # Return the error response as is
 
         user_chats = response.get_json()  # Extract JSON data from Response object
-        print("User Chats:", user_chats)
 
         if not user_chats.get("chats", []):
             return jsonify({"message": "No chats found for the user"}), 200
