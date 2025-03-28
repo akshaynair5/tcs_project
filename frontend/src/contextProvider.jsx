@@ -74,7 +74,6 @@ export const AuthContextProvider = ({ children }) => {
             console.log(err)
             throw new Error(err.response?.data?.error || "Invalid credentials.");
         }
-
     };
 
     // Logout function
