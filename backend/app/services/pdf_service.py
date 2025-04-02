@@ -5,6 +5,11 @@ from sentence_transformers import SentenceTransformer
 import os
 import pickle
 from dotenv import load_dotenv
+from app.services.deepseek_service import add_documents_to_graph
+import pytesseract  # OCR
+from PIL import Image
+import io
+from transformers import AutoProcessor, AutoModelForImageTextToText
 
 load_dotenv()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))  
@@ -22,6 +27,9 @@ NEO4J_URI = os.getenv("NEO4J_URI")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 NEO4J_USER = os.getenv("NEO4J_USERNAME")
 
+processor = AutoProcessor.from_pretrained("ds4sd/SmolDocling-256M-preview")
+model = AutoModelForImageTextToText.from_pretrained("ds4sd/SmolDocling-256M-preview")
+
 
 driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
@@ -29,14 +37,44 @@ driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 dimension = 384  # Embedding size
 
-def extract_text_from_pdf(pdf_path):
-    """Extracts text from a given PDF."""
-    text = ""
-    with fitz.open(pdf_path) as doc:
-        for page in doc:
-            text += page.get_text("text") + "\n"
+# def extract_text_from_pdf(pdf_path):
+#     """Extracts text from a given PDF."""
+#     text = ""
+#     with fitz.open(pdf_path) as doc:
+#         for page in doc:
+#             text += page.get_text("text") + "\n"
 
-    print("Extracted Text from PDF:\n", text[:500], "...")  # Print preview of extracted text
+#     print("Extracted Text from PDF:\n", text[:500], "...")  # Print preview of extracted text
+#     return text.strip()
+
+def extract_text_from_pdf(pdf_path):
+    """Extracts text and tabular data from a PDF using PyMuPDF, Tesseract OCR, and SmolDocling."""
+    text = ""
+    
+    with fitz.open(pdf_path) as doc:
+        for page_num, page in enumerate(doc):
+            # Extract text normally
+            text += page.get_text("text") + "\n"
+            
+            # Extract images for OCR (if scanned document)
+            images = page.get_images(full=True)
+            for img_index, img in enumerate(images):
+                xref = img[0]
+                base_image = doc.extract_image(xref)
+                image_bytes = base_image["image"]
+                image = Image.open(io.BytesIO(image_bytes))
+                
+                # Apply OCR to extract text from image
+                ocr_text = pytesseract.image_to_string(image)
+                text += f"\n[OCR Extracted from Image {img_index} on Page {page_num}]:\n{ocr_text}\n"
+                
+                # Use SmolDocling to process the image (for tabular data)
+                inputs = processor(image, return_tensors="pt")
+                outputs = model.generate(**inputs)
+                table_data = processor.batch_decode(outputs, skip_special_tokens=True)[0]
+                
+                text += f"\n[SmolDocling Extracted Table from Image {img_index}]:\n{table_data}\n"
+    
     return text.strip()
 
 def store_text_in_neo4j(text):
@@ -54,53 +92,11 @@ def store_text_in_neo4j(text):
 
 def process_pdf_and_store(pdf_path):
     """Extracts text from a PDF and stores it in Neo4j."""
+    print('Processing PDF: ')
     text = extract_text_from_pdf(pdf_path)
     if text:
-        store_text_in_neo4j(text)
-
-
-
-
-# dimension = 384  
-
-# def load_faiss_index():
-#     """Loads the FAISS index from disk, or creates a new one if missing."""
-#     if os.path.exists(FAISS_INDEX_PATH):
-#         try:
-#             print("Loading FAISS index from file...")
-#             return faiss.read_index(FAISS_INDEX_PATH)
-#         except Exception as e:
-#             print(f"Failed to load FAISS index, creating a new one: {e}")
-#     return faiss.IndexFlatL2(dimension)
-
-# index = load_faiss_index()
-
-# documents = []
-
-# def extract_text_from_pdf(pdf_path):
-#     """Extracts text from a given PDF and prints it."""
-#     text = ""
-#     with fitz.open(pdf_path) as doc:
-#         for page in doc:
-#             text += page.get_text("text") + "\n"
-    
-
-#     print("Extracted Text from PDF:\n", text)
-
-#     return text
-
-# def store_text_embedding(text):
-#     """Encodes and stores text embeddings in FAISS index along with original text."""
-#     global index, documents
-    
-#     documents.append(text)
-
-#     with open(DOCUMENTS_PATH, "wb") as f:
-#         pickle.dump(documents, f)
-
-#     embedding = embedding_model.encode([text])
-#     index.add(np.array(embedding, dtype=np.float32))
-
-#     faiss.write_index(index, FAISS_INDEX_PATH)
-#     print("FAISS index and documents saved successfully.")
-
+        print(text)
+        add_documents_to_graph(text)
+        print("✅ Document stored in Neo4j.")
+    else:
+        print("❌ Could not extract text from PDF.")

@@ -1,5 +1,6 @@
 import { createContext, use, useEffect, useState } from "react";
 import axios from "axios";
+import logout from "./components/logout";
 import { useNavigate } from "react-router-dom";
 
 // Create Context
@@ -10,34 +11,45 @@ export const AuthContextProvider = ({ children }) => {
     const [currentUser, setCurrentUser] = useState(null);
     const [currentUserData, setCurrentUserData] = useState(null);
     const [currentChat, setCurrentChat] = useState(null);
+    
     // Load user from localStorage on mount
     useEffect(() => {
         const token = localStorage.getItem("token");
         if (token) {
+            console.log("Token found:", token);
             axios.post(
                 "http://127.0.0.1:5000/api/verify-login",
-                {}, // Empty body (POST still works)
+                {}, 
                 {
                     headers: {
                         Authorization: `Bearer ${token}`, 
                         "Content-Type": "application/json",
-                    },
-                    withCredentials: true, // Important for sending cookies if needed
+                    }
                 }
             )
             .then((res) => {
-                if (res.data.error) {
-                    console.log(res);
-                    logout();
-                } else {
+                console.log("API Response:", res.data);
+                if (res.data && !res.data?.error) {
                     setCurrentUser(res.data);
+                    // window.location.href = "/";
+                } else {
+                    console.warn("Invalid token or user data:", res.data);
+                    logout();
                 }
             })
-            .catch(() => {
-                logout();
+            .catch((error) => {
+                console.error("Login verification failed:", error);
             });
         }
+        else{
+            console.log("No token found");
+            if(window.location.pathname !== "/login" && window.location.pathname !== "/register"){
+                window.location.href = "/login";
+            }
+        }
+
     }, []);
+    
 
     useEffect(() => {
         if (currentUser) {
@@ -47,10 +59,6 @@ export const AuthContextProvider = ({ children }) => {
                 .catch((err) => console.error("Error fetching chats:", err));
         }
     }, [currentUser]);
-
-    useEffect(()=>{
-        console.log(currentUserData)
-    },[currentUserData])
 
     useEffect(() => {
         if (currentUserData) {
@@ -76,16 +84,9 @@ export const AuthContextProvider = ({ children }) => {
         }
     };
 
-    // Logout function
-    const logout = () => {
-        const navigate = useNavigate();
-        localStorage.removeItem("token");
-        setCurrentUser(null);
-        navigate("/login");
-    };
 
     return (
-        <AuthContext.Provider value={{ currentUser, login, logout, currentUserData, setCurrentUserData, currentChat, setCurrentChat }}>
+        <AuthContext.Provider value={{ currentUser, login, currentUserData, setCurrentUserData, currentChat, setCurrentChat }}>
             {children}
         </AuthContext.Provider>
     );

@@ -10,7 +10,6 @@ const MessageBox = ({ content, role }) => {
     role === "assistant" && typeof content === "object"
       ? content.response_with_context || "No response available"
       : content;
-  console.log(messageText)
   return (
     <div className={`flex gap-3 w-[75vw] ${role === "user" ? "flex-row-reverse items-end" : "items-start"}`}>
       <img src={profileImage} alt="profile" className="w-8 h-8 rounded-full" />
