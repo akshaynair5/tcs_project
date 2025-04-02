@@ -1,0 +1,16 @@
+bson
+bcrpyt
+flask
+flask-cors
+jwt
+faiss-cpu
+numpy
+pandas
+sklearn
+pinecone-client
+sentence-transformers
+dotenv
+pymongo
+neo4j
+spacy
+# python -m spacy download en_core_web_sm
