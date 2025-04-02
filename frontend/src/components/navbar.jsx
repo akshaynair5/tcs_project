@@ -1,8 +1,9 @@
 import { Link } from "react-router-dom";
 import { useContext } from "react";
 import { AuthContext } from "../contextProvider";
+import logout from "./logout";
 const Navbar = () => {
-    const {logout} = useContext(AuthContext);
+  
   return (
     <nav className="fixed top-0 left-0 w-full h-[10vh] bg-black text-white flex items-center px-6 shadow-md">
       <div className="container mx-auto flex justify-between items-center">
@@ -10,9 +11,9 @@ const Navbar = () => {
         <div>
           <ul className="flex space-x-6">
             <li>
-              <Link className="hover:text-gray-400 transition" to="/register" onClick = {logout}>
+              <button className="hover:text-gray-400 transition" onClick = {logout}>
                 logout
-              </Link>
+              </button>
             </li>
           </ul>
         </div>

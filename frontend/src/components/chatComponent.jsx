@@ -52,11 +52,6 @@ const ChatComponent = () => {
     setInput("");
     setLoading(false);
   };
-  
-
-  useEffect(()=>{
-    console.log(messages)
-  },[messages])
 
   return (
     <div className="flex flex-col h-[75vh] bg-transparent p-4 fixed w-[80vw] left-[20vw] top-[12vh] overflow-y-scroll overflow-x-hidden">

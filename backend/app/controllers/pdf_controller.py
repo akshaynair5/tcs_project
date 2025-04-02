@@ -1,6 +1,6 @@
 import os
 from flask import request, jsonify
-from app.services.pdf_service import extract_text_from_pdf, store_text_in_neo4j
+from app.services.pdf_service import process_pdf_and_store
 
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -19,12 +19,7 @@ def upload_pdf():
 
     try:
         # Extract text from PDF
-        extracted_text = extract_text_from_pdf(file_path)
-        if not extracted_text.strip():
-            return jsonify({"error": "Extracted text is empty"}), 400
-
-        # Store extracted text in Neo4j
-        store_text_in_neo4j(extracted_text)
+        process_pdf_and_store(file_path)
 
         return jsonify({"message": "File uploaded and stored in Neo4j successfully"}), 200
     except Exception as e:

@@ -65,7 +65,6 @@ class UserModel:
     @staticmethod
     def get_user_chats_with_messages(user_id):
         try:
-            print("Received user_id:", user_id)
 
             # Validate ObjectId before querying
             if not ObjectId.is_valid(user_id):
@@ -73,7 +72,6 @@ class UserModel:
 
             # Fetch user chats
             user_chats = list(UserModel.chats_collection.find({"userId": ObjectId(user_id)}))
-            print("Raw User Chats:", user_chats)  # Debugging output
 
             for chat in user_chats:
                 chat["_id"] = str(chat["_id"])  # Convert ObjectId to string
@@ -81,7 +79,6 @@ class UserModel:
 
                 # Fetch messages for the chat
                 chat_messages = list(UserModel.messages_collection.find({"chatId": ObjectId(chat["_id"])}))
-                print(f"Raw Messages for chat {chat['_id']}:", chat_messages)  # Debugging output
 
                 # Convert ObjectId fields in messages
                 for message in chat_messages:
@@ -92,11 +89,6 @@ class UserModel:
                     message["_id"] = str(message["_id"])
                     message["chatId"] = str(message["chatId"])
                     message["userId"] = str(message["userId"])
-
-                # Check for timestamp issues
-                for msg in chat_messages:
-                    if "timestamp" not in msg or not isinstance(msg["timestamp"], (int, float)):
-                        print(f"Unexpected timestamp format in message: {msg}")
 
                 # Sort messages by timestamp (ensure no issues with missing timestamps)
                 try:

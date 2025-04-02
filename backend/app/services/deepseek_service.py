@@ -9,16 +9,14 @@ import os
 from pinecone import Pinecone, ServerlessSpec
 import time
 from neo4j import GraphDatabase
+import spacy
+import uuid
 
 load_dotenv()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__)) 
-VECTOR_STORE_DIR = os.path.join(BASE_DIR, "vector_store")  
-FAISS_INDEX_PATH = os.path.join(VECTOR_STORE_DIR, "faiss_index.bin")  # FAISS index path
-DOCUMENTS_PATH = os.path.join(VECTOR_STORE_DIR, "documents.pkl") 
-
-os.makedirs(VECTOR_STORE_DIR, exist_ok=True)
 
 PINECONE_API_KEY = os.getenv("PINECONE_SECRET_KEY")
+nlp = spacy.load("en_core_web_sm")
 NEO4J_URI = os.getenv("NEO4J_URI")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 NEO4J_USER = os.getenv("NEO4J_USERNAME")
@@ -30,50 +28,67 @@ driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
-
 d = 384 
-if not os.path.exists(FAISS_INDEX_PATH):
-    print("FAISS index file not found. Creating a new one...")
-    index = faiss.IndexFlatL2(d) 
-    faiss.write_index(index, FAISS_INDEX_PATH)  
-else:
-    index = faiss.read_index(FAISS_INDEX_PATH)  
-
 documents = []  
 
-insurance_types = [
-    "Comprehensive", "Liability", "Health", "Life", "Auto", "Travel",
-    "Homeowners", "Disability", "Pet", "Renters"
-]
 
-def add_insurance_types():
-    """Insert predefined insurance types into Neo4j."""
-    with driver.session() as session:
-        for ins_type in insurance_types:
-            query = """
-            MERGE (t:InsuranceType {name: $type})
-            """
-            session.run(query, type=ins_type)
+def extract_keywords(text):
+    """Extract insurance-related keywords from text using spaCy NER & Noun detection."""
+    doc = nlp(text)
+    keywords = set()
     
-    print("Inserted all insurance types into Neo4j.")
+    # Extract named entities (NER)
+    for ent in doc.ents:
+        keywords.add(ent.text.lower())  # Convert to lowercase for consistency
 
-# Run the function to populate Neo4j
-add_insurance_types()
+    # Extract relevant nouns (some important words might not be detected by NER)
+    for token in doc:
+        if token.pos_ in ["NOUN", "PROPN"] and token.is_alpha:
+            keywords.add(token.text.lower())
 
-def add_documents_to_graph(documents):
-    """Insert documents as nodes and automatically link to insurance types."""
+    return list(keywords)
+
+def add_insurance_type_if_new(insurance_type):
+    """Check if an insurance type exists in Neo4j, add it if it doesn't."""
     with driver.session() as session:
-        for doc in documents:
-            for ins_type in insurance_types:
-                if ins_type.lower() in doc["text"].lower():  # Match keyword in text
+        query = """
+        MERGE (t:InsuranceType {name: $type})
+        RETURN t.name
+        """
+        session.run(query, type=insurance_type)
+
+def add_documents_to_graph(doc_text):
+    """Insert a document as a node and dynamically extract & link insurance types."""
+    try:
+        if not isinstance(doc_text, str):
+            raise ValueError("Input document must be a string.")
+
+        with driver.session() as session:
+            doc_id = str(uuid.uuid4())  # Generate a unique ID for the document
+            
+            # Extract dynamic keywords from the document text
+            extracted_keywords = extract_keywords(doc_text)  
+            print(f"Extracted Keywords: {extracted_keywords}")
+
+            for keyword in extracted_keywords:
+                try:
+                    add_insurance_type_if_new(keyword)  # Insert only if new
+
                     query = """
                     MERGE (d:Document {id: $id, text: $text})
                     MERGE (t:InsuranceType {name: $type})
                     MERGE (d)-[:BELONGS_TO]->(t)
                     """
-                    session.run(query, id=doc["id"], text=doc["text"], type=ins_type)
+                    session.run(query, id=doc_id, text=doc_text, type=keyword)
 
-    print(f"Inserted {len(documents)} documents and linked entities.")
+                except Exception as e:
+                    print(f"Error linking keyword '{keyword}' to document {doc_id}: {e}")
+
+        print("Inserted document and linked extracted entities.")
+
+    except Exception as e:
+        print(f"Error in processing document: {e}")
+
 
 def search_context(question, top_k=3):
     """Find relevant insurance policies based on the question."""

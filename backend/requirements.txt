@@ -12,3 +12,5 @@ sentence-transformers
 dotenv
 pymongo
 neo4j
+spacy
+# python -m spacy download en_core_web_sm
