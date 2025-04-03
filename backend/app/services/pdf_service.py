@@ -37,15 +37,7 @@ driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 dimension = 384  # Embedding size
 
-# def extract_text_from_pdf(pdf_path):
-#     """Extracts text from a given PDF."""
-#     text = ""
-#     with fitz.open(pdf_path) as doc:
-#         for page in doc:
-#             text += page.get_text("text") + "\n"
 
-#     print("Extracted Text from PDF:\n", text[:500], "...")  # Print preview of extracted text
-#     return text.strip()
 
 def extract_text_from_pdf(pdf_path):
     """Extracts text and tabular data from a PDF using PyMuPDF, Tesseract OCR, and SmolDocling."""
@@ -88,7 +80,7 @@ def store_text_in_neo4j(text):
         """
         session.run(query, text=text, embedding=embedding)
 
-    print("✅ Document stored in Neo4j.")
+    print("Document stored in Neo4j.")
 
 def process_pdf_and_store(pdf_path):
     """Extracts text from a PDF and stores it in Neo4j."""
@@ -97,6 +89,6 @@ def process_pdf_and_store(pdf_path):
     if text:
         print(text)
         add_documents_to_graph(text)
-        print("✅ Document stored in Neo4j.")
+        print("Document stored in Neo4j.")
     else:
-        print("❌ Could not extract text from PDF.")
+        print("Could not extract text from PDF.")
