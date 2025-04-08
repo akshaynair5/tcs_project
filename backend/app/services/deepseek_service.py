@@ -3,6 +3,7 @@ import re
 import numpy as np
 import faiss
 import pickle
+import pandas as pd
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 import os
@@ -12,7 +13,11 @@ from neo4j import GraphDatabase
 import spacy
 from keybert import KeyBERT
 from sklearn.metrics.pairwise import cosine_similarity
+from ragas import SingleTurnSample
+from ragas.evaluation import evaluate
+from ragas.metrics import answer_relevancy, faithfulness, context_precision
 import uuid
+import math
 
 load_dotenv()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__)) 
@@ -32,8 +37,9 @@ driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 d = 384 
-documents = []  
-
+documents = []
+evaluation_data = []
+EVALUATION_CSV_PATH = "ragas_evaluation_log.csv"
 
 def extract_keywords(text, top_n=5):
     """Extracts insurance-related keywords using KeyBERT and spaCy NER/Noun detection."""
@@ -79,10 +85,13 @@ def add_insurance_type_if_new(insurance_type):
         session.run(query, type=insurance_type)
 
 def add_documents_to_graph(doc_text):
-    """Insert a document as a node and dynamically extract & link insurance types."""
+    """Insert a document as a node, store its embedding, and link insurance types."""
     try:
         if not isinstance(doc_text, str):
             raise ValueError("Input document must be a string.")
+
+        # Generate embedding for the full document
+        embedding = embedding_model.encode([doc_text])[0].tolist()
 
         with driver.session() as session:
             doc_id = str(uuid.uuid4())  # Generate unique document ID
@@ -96,13 +105,14 @@ def add_documents_to_graph(doc_text):
                 try:
                     add_insurance_type_if_new(keyword)  # Insert insurance type if new
 
-                    # Store document and link it to its insurance category
+                    # Store the document with text and embedding, and link to the insurance type
                     query = """
-                    MERGE (d:Document {id: $id, text: $text})
+                    MERGE (d:Document {id: $id})
+                    SET d.text = $text, d.embedding = $embedding
                     MERGE (t:InsuranceType {name: $type})
                     MERGE (d)-[:BELONGS_TO]->(t)
                     """
-                    session.run(query, id=doc_id, text=doc_text, type=keyword)
+                    session.run(query, id=doc_id, text=doc_text, embedding=embedding, type=keyword)
 
                     # Create relationships between similar keywords
                     for related_keyword in similar_keywords.get(keyword, []):
@@ -137,18 +147,29 @@ def search_context(question, top_k=3):
 
         documents = []
         document_embeddings = []
-        
+
         # Extract documents and embeddings from Neo4j
         for record in result:
-            documents.append(record["d.text"])
-            document_embeddings.append(record["d.embedding"])
-        
+            text = record["d.text"]
+            embedding = record["d.embedding"]
+
+            # Skip if embedding is missing, invalid, or contains NaN
+            if (
+                embedding is None
+                or not isinstance(embedding, list)
+                or any(np.isnan(embedding))
+            ):
+                continue
+
+            documents.append(text)
+            document_embeddings.append(embedding)
+
         if not documents:
             return "No documents found."
 
         # Compute cosine similarity
         similarities = cosine_similarity([question_embedding], document_embeddings)[0]
-        
+
         # Get top-k most similar documents
         top_indices = np.argsort(similarities)[-top_k:][::-1]
         top_contexts = [documents[i] for i in top_indices]
@@ -159,16 +180,146 @@ def search_context(question, top_k=3):
 def remove_think_tags(text):
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
+def evaluate_ragas():
+    if not evaluation_data:
+        print("No evaluation data available.")
+        return
 
-def generate_response(question):
-    """Generates a response using Ollama with and without Pinecone context."""
+    samples = []
+    for row in evaluation_data:
+        context = row.get("contexts", [])
+        question = row.get("question", "").strip()
+        answer = row.get("answer", "").strip()
+        reference = row.get("ground_truth")
+
+        # Clean reference for NaNs or empty values
+        if isinstance(reference, float) and np.isnan(reference):
+            continue  # Skip invalid sample
+        if isinstance(reference, str) and (reference.strip().lower() in ["", "nan"]):
+            continue  # Skip invalid sample
+
+        if (
+            isinstance(context, list) and context and
+            isinstance(context[0], str) and context[0].strip()
+        ):
+            sample = SingleTurnSample(
+                user_input=question,
+                retrieved_contexts=context,
+                response=answer,
+                reference=reference.strip() if isinstance(reference, str) else reference
+            )
+            samples.append(sample)
+
+
+    if not samples:
+        print("⚠️ No valid rows with context to evaluate.")
+        return
+
+    results = evaluate(
+        samples,
+        metrics=[answer_relevancy, faithfulness, context_precision]
+    )
+
+    results_df = results.to_pandas()
+    print(results_df)
+
+    if not os.path.exists(EVALUATION_CSV_PATH):
+        results_df.to_csv(EVALUATION_CSV_PATH, index=False)
+    else:
+        results_df.to_csv(EVALUATION_CSV_PATH, mode='a', header=False, index=False)
+
+    print(f"\nEvaluation results saved to '{EVALUATION_CSV_PATH}'")
+    if not evaluation_data:
+        print("No evaluation data available.")
+        return
+
+    # Convert evaluation data into a DataFrame for easy validation
+    df = pd.DataFrame(evaluation_data)
+
+    # Drop rows with NaN or empty question/answer/context
+    required_columns = ['question', 'answer', 'contexts']
+    df.dropna(subset=required_columns, inplace=True)
+
+    # Make sure all contexts are non-empty lists of non-empty strings
+    df = df[df['contexts'].apply(lambda x: isinstance(x, list) and all(isinstance(c, str) and c.strip() for c in x))]
+
+    # Ensure question and answer are non-empty strings
+    df = df[df['question'].apply(lambda x: isinstance(x, str) and x.strip() != "")]
+    df = df[df['answer'].apply(lambda x: isinstance(x, str) and x.strip() != "")]
+
+    # Optional: clean ground_truths if present
+    if 'ground_truth' in df.columns:
+        df['ground_truth'] = df['ground_truth'].apply(lambda x: x if isinstance(x, str) and x.strip() else None)
+
+    if df.empty:
+        print("⚠️ No valid rows with context to evaluate.")
+        return
+
+    # Convert each row into a SingleTurnSample
+    samples = [
+        SingleTurnSample(
+            user_input=row["question"],
+            retrieved_contexts=row["contexts"],
+            response=row["answer"],
+            reference=row.get("ground_truth")
+        )
+        for _, row in df.iterrows()
+    ]
+
+    results = evaluate(
+        samples,
+        metrics=[answer_relevancy, faithfulness, context_precision]
+    )
+
+    results_df = results.to_pandas()
+    print(results_df)
+
+    if not os.path.exists(EVALUATION_CSV_PATH):
+        results_df.to_csv(EVALUATION_CSV_PATH, index=False)
+    else:
+        results_df.to_csv(EVALUATION_CSV_PATH, mode='a', header=False, index=False)
+
+    print(f"\n Evaluation results saved to '{EVALUATION_CSV_PATH}'")
+
+
+def generate_response(question, ground_truth=None):
     context = search_context(question)
+    print(context)
     prompt_with_context = f"Based on the following context, provide a direct and concise answer.\n\nContext: {context}\n\nQuestion: {question}\n\n"
     prompt_without_context = f"Provide a direct and concise answer.\n\nQuestion: {question}\n\n"
-    
-    # Get responses
+
     response_with_context = remove_think_tags(run_ollama(prompt_with_context)) if context else "No relevant context found."
     response_without_context = remove_think_tags(run_ollama(prompt_without_context))
+
+    # Clean ground truth properly to avoid NaN issues
+    def clean_ground_truth(gt):
+        if gt is None:
+            return None
+        if isinstance(gt, float) and math.isnan(gt):
+            return None
+        if isinstance(gt, str):
+            stripped = gt.strip().lower()
+            if not stripped or stripped == "nan":
+                return None
+            return gt.strip()
+        return gt  # fallback
+
+    cleaned_ground_truth = clean_ground_truth(ground_truth)
+
+    if (
+        context and context.strip().lower() != "no relevant context found."
+        and isinstance(question, str) and question.strip()
+        and isinstance(response_with_context, str) and response_with_context.strip()
+    ):
+        evaluation_data.append({
+            "question": question.strip(),
+            "answer": response_with_context.strip(),
+            "contexts": [context.strip()],
+            "ground_truth": cleaned_ground_truth
+        })
+    else:
+        print(f"⚠️ Skipped logging: Invalid or missing data for question: '{question}'")
+
 
     return {
         "response_with_context": response_with_context,

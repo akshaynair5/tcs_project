@@ -83,12 +83,23 @@ def store_text_in_neo4j(text):
     print("Document stored in Neo4j.")
 
 def process_pdf_and_store(pdf_path):
-    """Extracts text from a PDF and stores it in Neo4j."""
-    print('Processing PDF: ')
+    """Extracts text from a PDF and stores it in Neo4j via add_documents_to_graph."""
+    print('Processing PDF:', pdf_path)
     text = extract_text_from_pdf(pdf_path)
-    if text:
-        print(text)
-        add_documents_to_graph(text)
-        print("Document stored in Neo4j.")
-    else:
-        print("Could not extract text from PDF.")
+
+    # Clean and validate text
+    cleaned_text = text.strip()
+    if not cleaned_text or len(cleaned_text) < 20:
+        print("Skipped: extracted text is empty or too short.")
+        return
+
+    # Check if embedding is valid before continuing
+    embedding = embedding_model.encode([cleaned_text])[0]
+    if np.isnan(embedding).any():
+        print("Skipped: embedding contains NaNs.")
+        return
+
+    # Text and embedding look good — proceed
+    add_documents_to_graph(cleaned_text)
+    print("Document stored in Neo4j.")
+
