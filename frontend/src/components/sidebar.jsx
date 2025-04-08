@@ -1,12 +1,12 @@
 import { useContext, useState } from "react";
 import { AuthContext } from "../contextProvider";
 import axios from "axios";
+import { motion, AnimatePresence } from "framer-motion";
 
 const ChatSidebar = () => {
     const { currentUserData, currentChat, setCurrentChat, currentUser } = useContext(AuthContext);
     const [newChatTitle, setNewChatTitle] = useState("");
 
-    // Function to create a new chat
     const createChat = async () => {
         if (!newChatTitle.trim()) return;
 
@@ -17,7 +17,6 @@ const ChatSidebar = () => {
             });
 
             if (response.status === 201) {
-                // Add the new chat to the list
                 setCurrentChat({
                     _id: response.data.chat_id,
                     title: newChatTitle,
@@ -25,7 +24,6 @@ const ChatSidebar = () => {
                     lastMessageTime: "Just now",
                 });
 
-                // Clear input field
                 setNewChatTitle("");
             }
         } catch (error) {
@@ -34,53 +32,65 @@ const ChatSidebar = () => {
     };
 
     return (
-        <aside className="w-[20vw] h-screen bg-gray-900 text-white p-4 overflow-y-auto z-10 flex flex-col">
-            <h2 className="text-xl font-bold mb-4">Chats</h2>
+        <aside className="w-[20vw] h-screen bg-[#1a1a1e] text-white p-4 overflow-y-auto z-10 flex flex-col border-r border-[#2a2a2e] shadow-lg">
+            <h2 className="text-2xl font-bold mb-6 text-[#cbd5e1] tracking-wide">Chats</h2>
 
             {/* New Chat Input */}
-            <div className="mb-4 flex">
+            <div className="mb-6 flex rounded-lg overflow-hidden border border-[#333] shadow-sm">
                 <input
                     type="text"
-                    placeholder="Chat title..."
+                    placeholder="Start a new chat..."
                     value={newChatTitle}
                     onChange={(e) => setNewChatTitle(e.target.value)}
-                    className="flex-grow p-2 rounded-l bg-gray-800 text-white border border-gray-700 focus:outline-none"
+                    className="flex-grow p-2 bg-[#26262b] text-white placeholder-gray-400 focus:outline-none"
                 />
                 <button
                     onClick={createChat}
-                    className="bg-blue-600 p-2 rounded-r hover:bg-blue-700"
+                    className="bg-[#3b82f6] px-4 text-white font-bold hover:bg-[#2563eb] transition"
                 >
                     +
                 </button>
             </div>
 
             {/* Chat List */}
-            <ul className="flex-grow overflow-auto">
+            <ul className="flex-grow overflow-auto space-y-2">
                 {currentUserData?.chats?.length > 0 ? (
-                    currentUserData.chats.map((chat) => (
-                        <li
-                            key={chat._id}
-                            className={`p-3 mb-2 rounded-lg cursor-pointer 
-                                ${currentChat?._id === chat._id ? "bg-blue-600" : "bg-gray-800"}`}
-                            onClick={() => setCurrentChat(chat)}
-                        >
-                            <div className="flex justify-between items-center">
-                                <span className="font-semibold">{chat.title}</span>
-                                <span className="text-sm text-gray-400">
-                                    {chat.lastMessageTime
-                                        ? new Date(chat.lastMessageTime).toLocaleString("en-US", {
-                                            weekday: "short", // "Wed"
-                                            hour: "2-digit",  // "00"
-                                            minute: "2-digit" // "23"
-                                        })
-                                        : "No messages"}
-                                </span>
-                            </div>
-                            <p className="text-gray-300 text-sm truncate">{chat.lastMessage?.response_with_context? chat.lastMessage.response_with_context : chat.lastMessage || "Start chatting..."}</p>
-                        </li>
-                    ))
+                    <AnimatePresence>
+                        {currentUserData.chats.map((chat) => (
+                            <motion.li
+                                key={chat._id}
+                                initial={{ opacity: 0, y: 10 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                exit={{ opacity: 0, y: -10 }}
+                                transition={{ duration: 0.2 }}
+                                className={`p-4 rounded-xl cursor-pointer transition-all duration-200 
+                                    ${currentChat?._id === chat._id
+                                        ? "bg-[#2563eb] text-white"
+                                        : "bg-[#2a2a2e] hover:bg-[#313136] text-gray-200"}`}
+                                onClick={() => setCurrentChat(chat)}
+                            >
+                                <div className="flex justify-between items-center mb-1">
+                                    <span className="font-semibold truncate">{chat.title}</span>
+                                    <span className="text-xs text-gray-400 whitespace-nowrap">
+                                        {chat.lastMessageTime
+                                            ? new Date(chat.lastMessageTime).toLocaleString("en-US", {
+                                                  weekday: "short",
+                                                  hour: "2-digit",
+                                                  minute: "2-digit",
+                                              })
+                                            : "No messages"}
+                                    </span>
+                                </div>
+                                <p className="text-sm text-gray-400 truncate">
+                                    {chat.lastMessage?.response_with_context
+                                        ? chat.lastMessage.response_with_context
+                                        : chat.lastMessage || "Start chatting..."}
+                                </p>
+                            </motion.li>
+                        ))}
+                    </AnimatePresence>
                 ) : (
-                    <p className="text-gray-400">No chats available</p>
+                    <p className="text-gray-500 text-sm text-center mt-10">No chats available</p>
                 )}
             </ul>
         </aside>

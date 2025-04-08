@@ -41,6 +41,18 @@ documents = []
 evaluation_data = []
 EVALUATION_CSV_PATH = "ragas_evaluation_log.csv"
 
+def clean_ground_truth(gt):
+    if gt is None:
+        return None
+    if isinstance(gt, float) and math.isnan(gt):
+        return None
+    if isinstance(gt, str):
+        stripped = gt.strip().lower()
+        if not stripped or stripped == "nan":
+            return None
+        return gt.strip()
+    return gt
+
 def extract_keywords(text, top_n=5):
     """Extracts insurance-related keywords using KeyBERT and spaCy NER/Noun detection."""
     doc = nlp(text)
@@ -180,146 +192,63 @@ def search_context(question, top_k=3):
 def remove_think_tags(text):
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
-def evaluate_ragas():
-    if not evaluation_data:
-        print("No evaluation data available.")
-        return
+def evaluate_and_store(sample_dict):
+    df = pd.DataFrame([sample_dict])
 
-    samples = []
-    for row in evaluation_data:
-        context = row.get("contexts", [])
-        question = row.get("question", "").strip()
-        answer = row.get("answer", "").strip()
-        reference = row.get("ground_truth")
-
-        # Clean reference for NaNs or empty values
-        if isinstance(reference, float) and np.isnan(reference):
-            continue  # Skip invalid sample
-        if isinstance(reference, str) and (reference.strip().lower() in ["", "nan"]):
-            continue  # Skip invalid sample
-
-        if (
-            isinstance(context, list) and context and
-            isinstance(context[0], str) and context[0].strip()
-        ):
-            sample = SingleTurnSample(
-                user_input=question,
-                retrieved_contexts=context,
-                response=answer,
-                reference=reference.strip() if isinstance(reference, str) else reference
-            )
-            samples.append(sample)
-
-
-    if not samples:
-        print("⚠️ No valid rows with context to evaluate.")
-        return
-
-    results = evaluate(
-        samples,
-        metrics=[answer_relevancy, faithfulness, context_precision]
-    )
-
-    results_df = results.to_pandas()
-    print(results_df)
-
-    if not os.path.exists(EVALUATION_CSV_PATH):
-        results_df.to_csv(EVALUATION_CSV_PATH, index=False)
-    else:
-        results_df.to_csv(EVALUATION_CSV_PATH, mode='a', header=False, index=False)
-
-    print(f"\nEvaluation results saved to '{EVALUATION_CSV_PATH}'")
-    if not evaluation_data:
-        print("No evaluation data available.")
-        return
-
-    # Convert evaluation data into a DataFrame for easy validation
-    df = pd.DataFrame(evaluation_data)
-
-    # Drop rows with NaN or empty question/answer/context
-    required_columns = ['question', 'answer', 'contexts']
-    df.dropna(subset=required_columns, inplace=True)
-
-    # Make sure all contexts are non-empty lists of non-empty strings
+    df.dropna(subset=['question', 'answer', 'contexts'], inplace=True)
     df = df[df['contexts'].apply(lambda x: isinstance(x, list) and all(isinstance(c, str) and c.strip() for c in x))]
-
-    # Ensure question and answer are non-empty strings
     df = df[df['question'].apply(lambda x: isinstance(x, str) and x.strip() != "")]
     df = df[df['answer'].apply(lambda x: isinstance(x, str) and x.strip() != "")]
-
-    # Optional: clean ground_truths if present
+    
     if 'ground_truth' in df.columns:
         df['ground_truth'] = df['ground_truth'].apply(lambda x: x if isinstance(x, str) and x.strip() else None)
 
     if df.empty:
-        print("⚠️ No valid rows with context to evaluate.")
+        print("Skipped evaluation: Invalid sample.")
         return
 
-    # Convert each row into a SingleTurnSample
-    samples = [
-        SingleTurnSample(
-            user_input=row["question"],
-            retrieved_contexts=row["contexts"],
-            response=row["answer"],
-            reference=row.get("ground_truth")
-        )
-        for _, row in df.iterrows()
-    ]
-
-    results = evaluate(
-        samples,
-        metrics=[answer_relevancy, faithfulness, context_precision]
+    sample = SingleTurnSample(
+        user_input=df.iloc[0]['question'],
+        retrieved_contexts=df.iloc[0]['contexts'],
+        response=df.iloc[0]['answer'],
+        reference=df.iloc[0].get('ground_truth')
     )
 
+    results = evaluate([sample], metrics=[answer_relevancy, faithfulness, context_precision])
     results_df = results.to_pandas()
-    print(results_df)
 
     if not os.path.exists(EVALUATION_CSV_PATH):
         results_df.to_csv(EVALUATION_CSV_PATH, index=False)
     else:
         results_df.to_csv(EVALUATION_CSV_PATH, mode='a', header=False, index=False)
 
-    print(f"\n Evaluation results saved to '{EVALUATION_CSV_PATH}'")
-
+    print(f"Evaluation result saved for question: '{sample.user_input}'")
 
 def generate_response(question, ground_truth=None):
     context = search_context(question)
-    print(context)
+    print(f"Context found: {context}")
     prompt_with_context = f"Based on the following context, provide a direct and concise answer.\n\nContext: {context}\n\nQuestion: {question}\n\n"
     prompt_without_context = f"Provide a direct and concise answer.\n\nQuestion: {question}\n\n"
 
     response_with_context = remove_think_tags(run_ollama(prompt_with_context)) if context else "No relevant context found."
     response_without_context = remove_think_tags(run_ollama(prompt_without_context))
 
-    # Clean ground truth properly to avoid NaN issues
-    def clean_ground_truth(gt):
-        if gt is None:
-            return None
-        if isinstance(gt, float) and math.isnan(gt):
-            return None
-        if isinstance(gt, str):
-            stripped = gt.strip().lower()
-            if not stripped or stripped == "nan":
-                return None
-            return gt.strip()
-        return gt  # fallback
-
-    cleaned_ground_truth = clean_ground_truth(ground_truth)
+    # cleaned_ground_truth = clean_ground_truth(ground_truth)
 
     if (
         context and context.strip().lower() != "no relevant context found."
         and isinstance(question, str) and question.strip()
         and isinstance(response_with_context, str) and response_with_context.strip()
     ):
-        evaluation_data.append({
+        sample = {
             "question": question.strip(),
             "answer": response_with_context.strip(),
             "contexts": [context.strip()],
-            "ground_truth": cleaned_ground_truth
-        })
+            "ground_truth": clean_ground_truth(ground_truth)
+        }
+        # evaluate_and_store(sample)
     else:
-        print(f"⚠️ Skipped logging: Invalid or missing data for question: '{question}'")
-
+        print(f"Skipped logging: Invalid or missing data for question: '{question}'")
 
     return {
         "response_with_context": response_with_context,
