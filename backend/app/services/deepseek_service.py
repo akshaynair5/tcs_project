@@ -1,8 +1,6 @@
 import subprocess
 import re
 import numpy as np
-import faiss
-import pickle
 import pandas as pd
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
@@ -18,6 +16,8 @@ from ragas.evaluation import evaluate
 from ragas.metrics import answer_relevancy, faithfulness, context_precision
 import uuid
 import math
+from rapidfuzz import fuzz
+
 
 load_dotenv()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__)) 
@@ -58,16 +58,14 @@ def extract_keywords(text, top_n=5):
     doc = nlp(text)
     keywords = set()
 
-    # Extract named entities (NER)
+
     for ent in doc.ents:
         keywords.add(ent.text.lower())  
-
-    # Extract nouns (sometimes important words are not recognized as named entities)
     for token in doc:
         if token.pos_ in ["NOUN", "PROPN"] and token.is_alpha:
             keywords.add(token.text.lower())
 
-    # Use KeyBERT to extract additional important keywords
+
     bert_keywords = kw_model.extract_keywords(text, keyphrase_ngram_range=(1,2), stop_words='english')
     keywords.update([kw[0] for kw in bert_keywords[:top_n]])  # Add extracted terms
 
@@ -75,14 +73,14 @@ def extract_keywords(text, top_n=5):
 
 def find_similar_keywords(keywords, threshold=0.7):
     """Finds similar keywords based on cosine similarity to avoid redundancy."""
-    vectors = embedding_model.encode(keywords)  # Convert keywords to vectors
+    vectors = embedding_model.encode(keywords) 
     sim_matrix = cosine_similarity(vectors)
 
     related_keywords = {}
     for i, keyword in enumerate(keywords):
         related_keywords[keyword] = [
             keywords[j] for j in range(len(keywords))
-            if sim_matrix[i][j] > threshold and i != j  # Avoid self-matching
+            if sim_matrix[i][j] > threshold and i != j 
         ]
     
     return related_keywords
@@ -96,97 +94,127 @@ def add_insurance_type_if_new(insurance_type):
         """
         session.run(query, type=insurance_type)
 
-def add_documents_to_graph(doc_text):
-    """Insert a document as a node, store its embedding, and link insurance types."""
+def split_paragraphs(doc_text):
+    return [para.strip() for para in re.split(r'\n\s*\n', doc_text.strip()) if para]
+
+def smart_chunk(text, max_words=150, overlap=30):
+    words = text.split()
+    chunks = []
+    for i in range(0, len(words), max_words - overlap):
+        chunk_words = words[i:i + max_words]
+        if chunk_words:
+            chunks.append(" ".join(chunk_words))
+    return chunks
+
+
+# Main function to add document to graph
+def add_documents_to_graph(doc_text_by_page):
     try:
-        if not isinstance(doc_text, str):
-            raise ValueError("Input document must be a string.")
-
-        # Generate embedding for the full document
-        embedding = embedding_model.encode([doc_text])[0].tolist()
-
         with driver.session() as session:
-            doc_id = str(uuid.uuid4())  # Generate unique document ID
-            extracted_keywords = extract_keywords(doc_text)  # Extract keywords
-            similar_keywords = find_similar_keywords(extracted_keywords)  # Find similar terms
+            for page_num, page_text in enumerate(doc_text_by_page, start=1):
+                chunks = smart_chunk(page_text)
 
-            print(f"Extracted Keywords: {extracted_keywords}")
-            print(f"Related Keywords: {similar_keywords}")
+                for index, chunk in enumerate(chunks):
+                    embedding = embedding_model.encode([chunk])[0].tolist()
+                    doc_id = str(uuid.uuid4())
+                    extracted_keywords = extract_keywords(chunk)
+                    similar_keywords = find_similar_keywords(extracted_keywords)
 
-            for keyword in extracted_keywords:
-                try:
-                    add_insurance_type_if_new(keyword)  # Insert insurance type if new
+                    for keyword in extracted_keywords:
+                        add_insurance_type_if_new(keyword)
 
-                    # Store the document with text and embedding, and link to the insurance type
-                    query = """
-                    MERGE (d:Document {id: $id})
-                    SET d.text = $text, d.embedding = $embedding
-                    MERGE (t:InsuranceType {name: $type})
-                    MERGE (d)-[:BELONGS_TO]->(t)
-                    """
-                    session.run(query, id=doc_id, text=doc_text, embedding=embedding, type=keyword)
+                        session.run("""
+                            MERGE (d:Document {id: $id})
+                            SET d.text = $text,
+                                d.embedding = $embedding,
+                                d.page = $page,
+                                d.chunk_index = $chunk_index
+                            MERGE (t:InsuranceType {name: $type})
+                            MERGE (d)-[:BELONGS_TO]->(t)
+                        """, {
+                            "id": doc_id,
+                            "text": chunk,
+                            "embedding": embedding,
+                            "page": page_num,
+                            "chunk_index": index,
+                            "type": keyword
+                        })
 
-                    # Create relationships between similar keywords
-                    for related_keyword in similar_keywords.get(keyword, []):
-                        query = """
-                        MATCH (t1:InsuranceType {name: $keyword}), (t2:InsuranceType {name: $related_keyword})
-                        MERGE (t1)-[:RELATED_TO]->(t2)
-                        MERGE (t2)-[:RELATED_TO]->(t1)
-                        """
-                        session.run(query, keyword=keyword, related_keyword=related_keyword)
+                        for related_keyword in similar_keywords.get(keyword, []):
+                            session.run("""
+                                MATCH (t1:InsuranceType {name: $keyword}),
+                                      (t2:InsuranceType {name: $related_keyword})
+                                MERGE (t1)-[:RELATED_TO]->(t2)
+                                MERGE (t2)-[:RELATED_TO]->(t1)
+                            """, keyword=keyword, related_keyword=related_keyword)
 
-                except Exception as e:
-                    print(f"Error linking keyword '{keyword}' to document {doc_id}: {e}")
-
-        print("Document inserted and linked successfully.")
+        print("Document chunks inserted with metadata successfully.")
 
     except Exception as e:
-        print(f"Error in processing document: {e}")
+        print(f"Error inserting document: {e}")
 
+# Search function
+def search_context(question, max_tokens=700, similarity_threshold=0.5):
+    try:
+        question_embedding = embedding_model.encode([question])[0].tolist()
 
-def search_context(question, top_k=3):
-    """Find relevant insurance policies based on semantic similarity."""
-    
-    # Generate question embedding
-    question_embedding = embedding_model.encode([question])[0].tolist()
+        with driver.session() as session:
+            query = """
+            MATCH (d:Document)
+            RETURN d.text AS text, d.embedding AS embedding, d.page AS page, d.chunk_index AS chunk_index
+            """
+            result = session.run(query)
 
-    with driver.session() as session:
-        query = """
-        MATCH (d:Document)
-        RETURN d.text, d.embedding
-        """
-        result = session.run(query)
+            chunks = []
+            embeddings = []
 
-        documents = []
-        document_embeddings = []
+            for record in result:
+                embedding = record["embedding"]
+                text = record["text"]
 
-        # Extract documents and embeddings from Neo4j
-        for record in result:
-            text = record["d.text"]
-            embedding = record["d.embedding"]
+                if embedding is None or not isinstance(embedding, list) or any(np.isnan(embedding)):
+                    continue
 
-            # Skip if embedding is missing, invalid, or contains NaN
-            if (
-                embedding is None
-                or not isinstance(embedding, list)
-                or any(np.isnan(embedding))
-            ):
-                continue
+                chunks.append({
+                    "text": text,
+                    "embedding": embedding,
+                    "page": record.get("page", 0),
+                    "chunk_index": record.get("chunk_index", 0)
+                })
+                embeddings.append(embedding)
 
-            documents.append(text)
-            document_embeddings.append(embedding)
+            if not chunks:
+                return "No relevant content in the graph."
 
-        if not documents:
-            return "No documents found."
+            similarities = cosine_similarity([question_embedding], embeddings)[0]
 
-        # Compute cosine similarity
-        similarities = cosine_similarity([question_embedding], document_embeddings)[0]
+            # Score with both cosine and fuzzy ratio
+            scored_chunks = []
+            for i, chunk in enumerate(chunks):
+                if similarities[i] >= similarity_threshold:
+                    fuzzy_score = fuzz.partial_ratio(question.lower(), chunk["text"].lower()) / 100
+                    final_score = (0.75 * similarities[i]) + (0.25 * fuzzy_score)
+                    scored_chunks.append((chunk, final_score))
 
-        # Get top-k most similar documents
-        top_indices = np.argsort(similarities)[-top_k:][::-1]
-        top_contexts = [documents[i] for i in top_indices]
+            scored_chunks.sort(key=lambda x: x[1], reverse=True)
 
-        return "\n".join(top_contexts) if top_contexts else "No relevant policy found."
+            # Select top chunks until max token budget is reached
+            context = []
+            current_tokens = 0
+            for chunk, _ in scored_chunks:
+                word_count = len(chunk["text"].split())
+                if current_tokens + word_count > max_tokens:
+                    break
+                context.append(chunk["text"])
+                current_tokens += word_count
+
+            if not context:
+                return "No relevant information found."
+
+            return "\n\n".join(context)
+
+    except Exception as e:
+        return f"Error in search: {e}"
 
 
 def remove_think_tags(text):
@@ -250,10 +278,8 @@ def generate_response(question, ground_truth=None):
     else:
         print(f"Skipped logging: Invalid or missing data for question: '{question}'")
 
-    return {
-        "response_with_context": response_with_context,
-        "response_without_context": response_without_context
-    }
+    print(response_without_context)
+    return response_with_context
 
 
 def run_ollama(prompt):

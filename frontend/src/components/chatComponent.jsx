@@ -80,8 +80,8 @@ const ChatComponent = () => {
       </div>
 
       {/* Bottom Input Bar */}
-      <div className="fixed bottom-4 left-[20vw] w-[80vw] flex justify-center">
-        <div className="w-[95vw] md:max-w-2xl flex gap-2 items-center">
+      <div className="fixed bottom-4 flex justify-center bg-white">
+        <div className="md:max-w-2xl flex gap-2 items-center">
           <ChatInput onSend={handleSend} />
         </div>
       </div>
