@@ -1,8 +1,7 @@
 import subprocess
 import re
 import numpy as np
-import faiss
-import pickle
+import pandas as pd
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 import os
@@ -12,7 +11,13 @@ from neo4j import GraphDatabase
 import spacy
 from keybert import KeyBERT
 from sklearn.metrics.pairwise import cosine_similarity
+from ragas import SingleTurnSample
+from ragas.evaluation import evaluate
+from ragas.metrics import answer_relevancy, faithfulness, context_precision
 import uuid
+import math
+from rapidfuzz import fuzz
+
 
 load_dotenv()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__)) 
@@ -32,24 +37,35 @@ driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 d = 384 
-documents = []  
+documents = []
+evaluation_data = []
+EVALUATION_CSV_PATH = "ragas_evaluation_log.csv"
 
+def clean_ground_truth(gt):
+    if gt is None:
+        return None
+    if isinstance(gt, float) and math.isnan(gt):
+        return None
+    if isinstance(gt, str):
+        stripped = gt.strip().lower()
+        if not stripped or stripped == "nan":
+            return None
+        return gt.strip()
+    return gt
 
 def extract_keywords(text, top_n=5):
     """Extracts insurance-related keywords using KeyBERT and spaCy NER/Noun detection."""
     doc = nlp(text)
     keywords = set()
 
-    # Extract named entities (NER)
+
     for ent in doc.ents:
         keywords.add(ent.text.lower())  
-
-    # Extract nouns (sometimes important words are not recognized as named entities)
     for token in doc:
         if token.pos_ in ["NOUN", "PROPN"] and token.is_alpha:
             keywords.add(token.text.lower())
 
-    # Use KeyBERT to extract additional important keywords
+
     bert_keywords = kw_model.extract_keywords(text, keyphrase_ngram_range=(1,2), stop_words='english')
     keywords.update([kw[0] for kw in bert_keywords[:top_n]])  # Add extracted terms
 
@@ -57,14 +73,14 @@ def extract_keywords(text, top_n=5):
 
 def find_similar_keywords(keywords, threshold=0.7):
     """Finds similar keywords based on cosine similarity to avoid redundancy."""
-    vectors = embedding_model.encode(keywords)  # Convert keywords to vectors
+    vectors = embedding_model.encode(keywords) 
     sim_matrix = cosine_similarity(vectors)
 
     related_keywords = {}
     for i, keyword in enumerate(keywords):
         related_keywords[keyword] = [
             keywords[j] for j in range(len(keywords))
-            if sim_matrix[i][j] > threshold and i != j  # Avoid self-matching
+            if sim_matrix[i][j] > threshold and i != j 
         ]
     
     return related_keywords
@@ -78,102 +94,192 @@ def add_insurance_type_if_new(insurance_type):
         """
         session.run(query, type=insurance_type)
 
-def add_documents_to_graph(doc_text):
-    """Insert a document as a node and dynamically extract & link insurance types."""
+def split_paragraphs(doc_text):
+    return [para.strip() for para in re.split(r'\n\s*\n', doc_text.strip()) if para]
+
+def smart_chunk(text, max_words=150, overlap=30):
+    words = text.split()
+    chunks = []
+    for i in range(0, len(words), max_words - overlap):
+        chunk_words = words[i:i + max_words]
+        if chunk_words:
+            chunks.append(" ".join(chunk_words))
+    return chunks
+
+
+# Main function to add document to graph
+def add_documents_to_graph(doc_text_by_page):
     try:
-        if not isinstance(doc_text, str):
-            raise ValueError("Input document must be a string.")
-
         with driver.session() as session:
-            doc_id = str(uuid.uuid4())  # Generate unique document ID
-            extracted_keywords = extract_keywords(doc_text)  # Extract keywords
-            similar_keywords = find_similar_keywords(extracted_keywords)  # Find similar terms
+            for page_num, page_text in enumerate(doc_text_by_page, start=1):
+                chunks = smart_chunk(page_text)
 
-            print(f"Extracted Keywords: {extracted_keywords}")
-            print(f"Related Keywords: {similar_keywords}")
+                for index, chunk in enumerate(chunks):
+                    embedding = embedding_model.encode([chunk])[0].tolist()
+                    doc_id = str(uuid.uuid4())
+                    extracted_keywords = extract_keywords(chunk)
+                    similar_keywords = find_similar_keywords(extracted_keywords)
 
-            for keyword in extracted_keywords:
-                try:
-                    add_insurance_type_if_new(keyword)  # Insert insurance type if new
+                    for keyword in extracted_keywords:
+                        add_insurance_type_if_new(keyword)
 
-                    # Store document and link it to its insurance category
-                    query = """
-                    MERGE (d:Document {id: $id, text: $text})
-                    MERGE (t:InsuranceType {name: $type})
-                    MERGE (d)-[:BELONGS_TO]->(t)
-                    """
-                    session.run(query, id=doc_id, text=doc_text, type=keyword)
+                        session.run("""
+                            MERGE (d:Document {id: $id})
+                            SET d.text = $text,
+                                d.embedding = $embedding,
+                                d.page = $page,
+                                d.chunk_index = $chunk_index
+                            MERGE (t:InsuranceType {name: $type})
+                            MERGE (d)-[:BELONGS_TO]->(t)
+                        """, {
+                            "id": doc_id,
+                            "text": chunk,
+                            "embedding": embedding,
+                            "page": page_num,
+                            "chunk_index": index,
+                            "type": keyword
+                        })
 
-                    # Create relationships between similar keywords
-                    for related_keyword in similar_keywords.get(keyword, []):
-                        query = """
-                        MATCH (t1:InsuranceType {name: $keyword}), (t2:InsuranceType {name: $related_keyword})
-                        MERGE (t1)-[:RELATED_TO]->(t2)
-                        MERGE (t2)-[:RELATED_TO]->(t1)
-                        """
-                        session.run(query, keyword=keyword, related_keyword=related_keyword)
+                        for related_keyword in similar_keywords.get(keyword, []):
+                            session.run("""
+                                MATCH (t1:InsuranceType {name: $keyword}),
+                                      (t2:InsuranceType {name: $related_keyword})
+                                MERGE (t1)-[:RELATED_TO]->(t2)
+                                MERGE (t2)-[:RELATED_TO]->(t1)
+                            """, keyword=keyword, related_keyword=related_keyword)
 
-                except Exception as e:
-                    print(f"Error linking keyword '{keyword}' to document {doc_id}: {e}")
-
-        print("Document inserted and linked successfully.")
+        print("Document chunks inserted with metadata successfully.")
 
     except Exception as e:
-        print(f"Error in processing document: {e}")
+        print(f"Error inserting document: {e}")
 
+# Search function
+def search_context(question, max_tokens=700, similarity_threshold=0.5):
+    try:
+        question_embedding = embedding_model.encode([question])[0].tolist()
 
-def search_context(question, top_k=3):
-    """Find relevant insurance policies based on semantic similarity."""
-    
-    # Generate question embedding
-    question_embedding = embedding_model.encode([question])[0].tolist()
+        with driver.session() as session:
+            query = """
+            MATCH (d:Document)
+            RETURN d.text AS text, d.embedding AS embedding, d.page AS page, d.chunk_index AS chunk_index
+            """
+            result = session.run(query)
 
-    with driver.session() as session:
-        query = """
-        MATCH (d:Document)
-        RETURN d.text, d.embedding
-        """
-        result = session.run(query)
+            chunks = []
+            embeddings = []
 
-        documents = []
-        document_embeddings = []
-        
-        # Extract documents and embeddings from Neo4j
-        for record in result:
-            documents.append(record["d.text"])
-            document_embeddings.append(record["d.embedding"])
-        
-        if not documents:
-            return "No documents found."
+            for record in result:
+                embedding = record["embedding"]
+                text = record["text"]
 
-        # Compute cosine similarity
-        similarities = cosine_similarity([question_embedding], document_embeddings)[0]
-        
-        # Get top-k most similar documents
-        top_indices = np.argsort(similarities)[-top_k:][::-1]
-        top_contexts = [documents[i] for i in top_indices]
+                if embedding is None or not isinstance(embedding, list) or any(np.isnan(embedding)):
+                    continue
 
-        return "\n".join(top_contexts) if top_contexts else "No relevant policy found."
+                chunks.append({
+                    "text": text,
+                    "embedding": embedding,
+                    "page": record.get("page", 0),
+                    "chunk_index": record.get("chunk_index", 0)
+                })
+                embeddings.append(embedding)
+
+            if not chunks:
+                return "No relevant content in the graph."
+
+            similarities = cosine_similarity([question_embedding], embeddings)[0]
+
+            # Score with both cosine and fuzzy ratio
+            scored_chunks = []
+            for i, chunk in enumerate(chunks):
+                if similarities[i] >= similarity_threshold:
+                    fuzzy_score = fuzz.partial_ratio(question.lower(), chunk["text"].lower()) / 100
+                    final_score = (0.75 * similarities[i]) + (0.25 * fuzzy_score)
+                    scored_chunks.append((chunk, final_score))
+
+            scored_chunks.sort(key=lambda x: x[1], reverse=True)
+
+            # Select top chunks until max token budget is reached
+            context = []
+            current_tokens = 0
+            for chunk, _ in scored_chunks:
+                word_count = len(chunk["text"].split())
+                if current_tokens + word_count > max_tokens:
+                    break
+                context.append(chunk["text"])
+                current_tokens += word_count
+
+            if not context:
+                return "No relevant information found."
+
+            return "\n\n".join(context)
+
+    except Exception as e:
+        return f"Error in search: {e}"
 
 
 def remove_think_tags(text):
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
+def evaluate_and_store(sample_dict):
+    df = pd.DataFrame([sample_dict])
 
-def generate_response(question):
-    """Generates a response using Ollama with and without Pinecone context."""
+    df.dropna(subset=['question', 'answer', 'contexts'], inplace=True)
+    df = df[df['contexts'].apply(lambda x: isinstance(x, list) and all(isinstance(c, str) and c.strip() for c in x))]
+    df = df[df['question'].apply(lambda x: isinstance(x, str) and x.strip() != "")]
+    df = df[df['answer'].apply(lambda x: isinstance(x, str) and x.strip() != "")]
+    
+    if 'ground_truth' in df.columns:
+        df['ground_truth'] = df['ground_truth'].apply(lambda x: x if isinstance(x, str) and x.strip() else None)
+
+    if df.empty:
+        print("Skipped evaluation: Invalid sample.")
+        return
+
+    sample = SingleTurnSample(
+        user_input=df.iloc[0]['question'],
+        retrieved_contexts=df.iloc[0]['contexts'],
+        response=df.iloc[0]['answer'],
+        reference=df.iloc[0].get('ground_truth')
+    )
+
+    results = evaluate([sample], metrics=[answer_relevancy, faithfulness, context_precision])
+    results_df = results.to_pandas()
+
+    if not os.path.exists(EVALUATION_CSV_PATH):
+        results_df.to_csv(EVALUATION_CSV_PATH, index=False)
+    else:
+        results_df.to_csv(EVALUATION_CSV_PATH, mode='a', header=False, index=False)
+
+    print(f"Evaluation result saved for question: '{sample.user_input}'")
+
+def generate_response(question, ground_truth=None):
     context = search_context(question)
+    print(f"Context found: {context}")
     prompt_with_context = f"Based on the following context, provide a direct and concise answer.\n\nContext: {context}\n\nQuestion: {question}\n\n"
     prompt_without_context = f"Provide a direct and concise answer.\n\nQuestion: {question}\n\n"
-    
-    # Get responses
+
     response_with_context = remove_think_tags(run_ollama(prompt_with_context)) if context else "No relevant context found."
     response_without_context = remove_think_tags(run_ollama(prompt_without_context))
 
-    return {
-        "response_with_context": response_with_context,
-        "response_without_context": response_without_context
-    }
+    # cleaned_ground_truth = clean_ground_truth(ground_truth)
+
+    if (
+        context and context.strip().lower() != "no relevant context found."
+        and isinstance(question, str) and question.strip()
+        and isinstance(response_with_context, str) and response_with_context.strip()
+    ):
+        sample = {
+            "question": question.strip(),
+            "answer": response_with_context.strip(),
+            "contexts": [context.strip()],
+            "ground_truth": clean_ground_truth(ground_truth)
+        }
+        # evaluate_and_store(sample)
+    else:
+        print(f"Skipped logging: Invalid or missing data for question: '{question}'")
+
+    print(response_without_context)
+    return response_with_context
 
 
 def run_ollama(prompt):

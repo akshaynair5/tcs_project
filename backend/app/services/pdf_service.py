@@ -10,85 +10,94 @@ import pytesseract  # OCR
 from PIL import Image
 import io
 from transformers import AutoProcessor, AutoModelForImageTextToText
+import re
 
+# Load environment variables
 load_dotenv()
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))  
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-VECTOR_STORE_DIR = os.path.join(BASE_DIR, "vector_store")  
-FAISS_INDEX_PATH = os.path.join(VECTOR_STORE_DIR, "faiss_index.bin") 
-DOCUMENTS_PATH = os.path.join(VECTOR_STORE_DIR, "documents.pkl")
-
-os.makedirs(VECTOR_STORE_DIR, exist_ok=True)
-
-
+# Initialize models
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-
-NEO4J_URI = os.getenv("NEO4J_URI")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
-NEO4J_USER = os.getenv("NEO4J_USERNAME")
-
 processor = AutoProcessor.from_pretrained("ds4sd/SmolDocling-256M-preview")
 model = AutoModelForImageTextToText.from_pretrained("ds4sd/SmolDocling-256M-preview")
 
+# Tesseract setup
+tesseract_path = r"C:\Program Files\Tesseract-OCR"
+tesseract_exe = os.path.join(tesseract_path, "tesseract.exe")
+pytesseract.pytesseract.tesseract_cmd = tesseract_exe
+os.environ["PATH"] += os.pathsep + tesseract_path
 
+# Neo4j credentials
+NEO4J_URI = os.getenv("NEO4J_URI")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
+NEO4J_USER = os.getenv("NEO4J_USERNAME")
 driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
 
-# Sentence Transformer Model
-embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
-dimension = 384  # Embedding size
+# Embedding size
+dimension = 384
 
-
-
-def extract_text_from_pdf(pdf_path):
-    """Extracts text and tabular data from a PDF using PyMuPDF, Tesseract OCR, and SmolDocling."""
-    text = ""
-    
-    with fitz.open(pdf_path) as doc:
-        for page_num, page in enumerate(doc):
-            # Extract text normally
-            text += page.get_text("text") + "\n"
-            
-            # Extract images for OCR (if scanned document)
-            images = page.get_images(full=True)
-            for img_index, img in enumerate(images):
-                xref = img[0]
-                base_image = doc.extract_image(xref)
-                image_bytes = base_image["image"]
-                image = Image.open(io.BytesIO(image_bytes))
-                
-                # Apply OCR to extract text from image
-                ocr_text = pytesseract.image_to_string(image)
-                text += f"\n[OCR Extracted from Image {img_index} on Page {page_num}]:\n{ocr_text}\n"
-                
-                # Use SmolDocling to process the image (for tabular data)
-                inputs = processor(image, return_tensors="pt")
-                outputs = model.generate(**inputs)
-                table_data = processor.batch_decode(outputs, skip_special_tokens=True)[0]
-                
-                text += f"\n[SmolDocling Extracted Table from Image {img_index}]:\n{table_data}\n"
-    
+def clean_text(text):
+    # Remove unnecessary line breaks, multiple spaces, and OCR noise like 'ﬁ', 'ﬂ'
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n\s*\n", "\n\n", text)
+    text = re.sub(r"[\ufb01\ufb02]", "", text) 
     return text.strip()
 
-def store_text_in_neo4j(text):
-    """Encodes text and stores it in Neo4j along with its embedding."""
-    embedding = embedding_model.encode([text])[0].tolist()  # Convert to list for storage
-    
-    with driver.session() as session:
-        query = """
-        MERGE (d:Document {text: $text, embedding: $embedding})
-        RETURN d
-        """
-        session.run(query, text=text, embedding=embedding)
+def extract_text_from_pdf(pdf_path):
+    """Returns list of per-page text blocks with OCR and SmolDocling enhancements."""
+    page_texts = []
 
-    print("Document stored in Neo4j.")
+    with fitz.open(pdf_path) as doc:
+        for page_num, page in enumerate(doc):
+            combined_text = ""
+            try:
+                combined_text += page.get_text("text") + "\n"
+            except Exception as e:
+                print(f"[ERROR] Text extraction failed on page {page_num}: {e}")
+
+            images = page.get_images(full=True)
+            for img_index, img in enumerate(images):
+                try:
+                    xref = img[0]
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+                    try:
+                        ocr_text = pytesseract.image_to_string(image)
+                        combined_text += f"\n[OCR Image {img_index}]:\n{ocr_text}\n"
+                    except Exception as ocr_error:
+                        print(f"[ERROR] OCR failed: {ocr_error}")
+
+                    try:
+                        inputs = processor(image, return_tensors="pt")
+                        outputs = model.generate(**inputs)
+                        table_data = processor.batch_decode(outputs, skip_special_tokens=True)[0]
+                        combined_text += f"\n[SmolDocling Table {img_index}]:\n{table_data}\n"
+                    except Exception as smol_error:
+                        print(f"[ERROR] SmolDocling failed: {smol_error}")
+
+                except Exception as img_error:
+                    print(f"[ERROR] Image extraction failed: {img_error}")
+
+            page_texts.append(clean_text(combined_text))
+
+    return page_texts
 
 def process_pdf_and_store(pdf_path):
-    """Extracts text from a PDF and stores it in Neo4j."""
-    print('Processing PDF: ')
-    text = extract_text_from_pdf(pdf_path)
-    if text:
-        print(text)
-        add_documents_to_graph(text)
-        print("Document stored in Neo4j.")
-    else:
-        print("Could not extract text from PDF.")
+    """Extracts text from a PDF and stores it in Neo4j via add_documents_to_graph."""
+    print('Processing PDF:', pdf_path)
+    try:
+        page_texts = extract_text_from_pdf(pdf_path)
+
+        total_text = " ".join(page_texts)
+        if not total_text or len(total_text) < 20:
+            print("Skipped: extracted text is empty or too short.")
+            return
+
+        add_documents_to_graph(page_texts)
+        print("✅ Document stored in Neo4j.")
+
+    except Exception as err:
+        print(f"[ERROR] Failed to process and store PDF: {err}")
+
