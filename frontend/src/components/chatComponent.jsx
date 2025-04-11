@@ -1,92 +1,90 @@
-import { useContext, useEffect, useState } from "react";
+import { useContext, useEffect, useState, useRef } from "react";
 import MessageBox from "./messageBox";
-import { Send } from "lucide-react";
 import ChatInput from "./chatBar";
 import FileUpload from "./fileUpload";
 import { AuthContext } from "../contextProvider";
 import axios from "axios";
+import { motion } from "framer-motion";
 
 const ChatComponent = () => {
-  const {currentUser, currentChat} = useContext(AuthContext);
+  const { currentUser, currentChat } = useContext(AuthContext);
   const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false); 
+  const [loading, setLoading] = useState(false);
+  const messagesEndRef = useRef(null);
 
-  useEffect(()=>{
-    if(currentChat && currentChat.messages){
+  useEffect(() => {
+    if (currentChat && currentChat.messages) {
       setMessages(currentChat.messages);
     }
-  },[currentChat])
+  }, [currentChat]);
 
-  const handleSend = async () => {
+  // Auto scroll to bottom on new message
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, loading]);
+
+  const handleSend = async (input) => {
     if (!input.trim()) return;
-  
-    // Fix: Use correct keys (`content` instead of `text`, `role` instead of `sender`)
+
     const newMessage = { content: input, role: "user" };
-    setMessages((prevMessages) => [...prevMessages, newMessage]);
-  
+    setMessages((prev) => [...prev, newMessage]);
     setLoading(true);
-  
+
     try {
       const { data } = await axios.post("http://127.0.0.1:5000/api/ask", {
         chat_id: currentChat._id,
         user_id: currentUser.user_id,
         question: input,
       });
-  
-      // Fix: Ensure assistant response structure matches what `MessageBox` expects
-      console.log(data.answer)
+
       const assistantMessage = { content: data.answer, role: "ai_assistant" };
-      setMessages((prevMessages) => [...prevMessages, assistantMessage]);
+      setMessages((prev) => [...prev, assistantMessage]);
     } catch (error) {
-      console.error("Error:", error);
-  
       const errorMessage = {
         content: error.response?.data?.error || "Something went wrong",
         role: "ai_assistant",
       };
-  
-      setMessages((prevMessages) => [...prevMessages, errorMessage]);
+      setMessages((prev) => [...prev, errorMessage]);
     }
-  
-    setInput("");
+
     setLoading(false);
   };
 
   return (
-    <div className="flex flex-col h-[75vh] bg-transparent p-4 fixed w-[80vw] left-[20vw] top-[12vh] overflow-y-scroll overflow-x-hidden">
-      {/* Chat Messages */}
-      <div className="flex flex-col overflow-y-auto mb-4 space-y-4 h-screen w-screen">
+    <div className="flex flex-col fixed left-[20vw] top-[10vh] w-[80vw] h-[90vh] bg-[#1a1a1e] px-4 pt-4 pb-24 overflow-y-auto">
+      {/* Message Area */}
+      <div className="flex flex-col gap-4 overflow-y-auto text-white">
         {messages.map((msg, index) => (
-          <MessageBox key={index} content={msg.content} role={msg.role} />
+          <motion.div
+            key={index}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.25 }}
+          >
+            <MessageBox content={msg.content} role={msg.role} />
+          </motion.div>
         ))}
 
         {loading && (
-          <div className="text-center text-gray-500 text-sm animate-pulse">
+          <motion.div
+            className="text-center text-sm text-gray-400 animate-pulse"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ repeat: Infinity, duration: 1 }}
+          >
             Typing...
-          </div>
+          </motion.div>
         )}
+
+        <div ref={messagesEndRef} />
       </div>
 
-      <div className="fixed top-[87vh] w-[75vw] flex items-center gap-2 p-3 bg-transparent">
-        <input
-          type="text"
-          className="flex-1 p-2 border rounded-lg focus:outline-none focus:ring-1 focus:ring-gray-500"
-          placeholder="Type your query..."
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleSend()}
-        />
-        <button
-          className="p-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 transition"
-          onClick={handleSend}
-          disabled={loading}
-        >
-          <Send size={20} />
-        </button>
-        <FileUpload />
+      {/* Bottom Input Bar */}
+      <div className="fixed bottom-4 flex justify-center bg-white">
+        <div className="md:max-w-2xl flex gap-2 items-center">
+          <ChatInput onSend={handleSend} />
+        </div>
       </div>
-      {/* <ChatInput onSend={handleSend} /> */}
     </div>
   );
 };

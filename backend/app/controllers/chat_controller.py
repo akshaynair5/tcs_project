@@ -1,5 +1,6 @@
 from flask import jsonify, request
 from app.models.chat_model import ChatModel
+from app.models.message_model import MessageModel 
 
 class ChatController:
     @staticmethod
@@ -22,11 +23,14 @@ class ChatController:
 
         chat_list = [{"chat_id": str(chat["_id"]), "title": chat["title"], "createdAt": chat["createdAt"]} for chat in chats]
         return jsonify(chat_list), 200
-
+    
     @staticmethod
     def delete_chat(chat_id):
         result = ChatModel.delete_chat(chat_id)
+
         if result.deleted_count == 0:
             return jsonify({"error": "Chat not found"}), 404
 
-        return jsonify({"message": "Chat deleted successfully"}), 200
+        MessageModel.delete_messages_by_chat(chat_id)
+
+        return jsonify({"message": "Chat and associated messages deleted successfully"}), 200

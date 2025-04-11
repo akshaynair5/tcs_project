@@ -13,4 +13,5 @@ dotenv
 pymongo
 neo4j
 spacy
+rapidfuzz
 # python -m spacy download en_core_web_sm
