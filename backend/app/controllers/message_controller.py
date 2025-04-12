@@ -42,3 +42,13 @@ class MessageController:
             return jsonify({"error": "No messages found"}), 404
 
         return jsonify({"message": "Messages deleted successfully"}), 200
+    
+    @staticmethod
+    def delete_message(message_id):
+        result = MessageModel.delete_message_by_id(message_id)
+        if result.deleted_count == 0:
+            return jsonify({"error": "Message not found"}), 404
+
+        return jsonify({"message": "Message deleted successfully"}), 200
+        
+
