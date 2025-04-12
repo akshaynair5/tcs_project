@@ -89,56 +89,58 @@ const ChatSidebar = () => {
             <ul className="flex-grow overflow-auto space-y-2">
                 {chats.length > 0 ? (
                     <AnimatePresence>
-                        {chats.map((chat) => (
-                            <motion.li
-                                key={chat._id}
-                                initial={{ opacity: 0, y: 10 }}
-                                animate={{ opacity: 1, y: 0 }}
-                                exit={{ opacity: 0, y: -10 }}
-                                transition={{ duration: 0.2 }}
-                                className={`p-4 rounded-xl transition-all duration-200 relative group
-                                    ${currentChat?._id === chat._id
-                                        ? "bg-[#2563eb] text-white"
-                                        : "bg-[#2a2a2e] hover:bg-[#313136] text-gray-200"}`}
-                            >
-                                <div className="flex justify-between items-start">
-                                    <div
-                                        className="flex-1 cursor-pointer"
-                                        onClick={() => setCurrentChat(chat)}
-                                    >
-                                        <span className="font-semibold truncate block">{chat.title}</span>
-                                        <span className="text-xs text-gray-400 whitespace-nowrap">
-                                            {chat.lastMessageTime
-                                                ? new Date(chat.lastMessageTime).toLocaleString("en-US", {
-                                                    weekday: "short",
-                                                    hour: "2-digit",
-                                                    minute: "2-digit",
-                                                })
-                                                : "No messages"}
-                                        </span>
-                                        <p className="text-sm text-gray-400 truncate mt-1">
-                                            {chat.lastMessage?.response_with_context
-                                                ? chat.lastMessage.response_with_context
-                                                : chat.lastMessage || "Start chatting..."}
-                                        </p>
-                                    </div>
+                    {chats.map((chat) => (
+                        <motion.li
+                        key={chat._id}
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -10 }}
+                        transition={{ duration: 0.2 }}
+                        className={`p-4 rounded-xl transition-all duration-200 relative group flex flex-col justify-between
+                            ${currentChat?._id === chat._id
+                            ? "bg-[#2563eb] text-white"
+                            : "bg-[#2a2a2e] hover:bg-[#313136] text-gray-200"}`}
+                        >
+                        {/* Chat Content */}
+                        <div
+                            className="flex-1 cursor-pointer"
+                            onClick={() => setCurrentChat(chat)}
+                        >
+                            <span className="font-semibold truncate block">{chat.title}</span>
+                            <span className="text-xs text-gray-400 whitespace-nowrap">
+                            {chat.lastMessageTime
+                                ? new Date(chat.lastMessageTime).toLocaleString("en-US", {
+                                    weekday: "short",
+                                    hour: "2-digit",
+                                    minute: "2-digit",
+                                })
+                                : "No messages"}
+                            </span>
+                            <p className="text-sm text-gray-400 truncate mt-1">
+                            {chat.lastMessage?.response_with_context
+                                ? chat.lastMessage.response_with_context
+                                : chat.lastMessage || "Start chatting..."}
+                            </p>
+                        </div>
 
-                                    {/* Delete Button */}
-                                    <button
-                                        onClick={() => deleteChat(chat._id)}
-                                        className="text-gray-400 hover:text-red-500 ml-2 mt-1"
-                                        title="Delete chat"
-                                    >
-                                        <Trash2 size={16} />
-                                    </button>
-                                </div>
-                            </motion.li>
-                        ))}
+                        {/* Delete Button at Bottom Right */}
+                        <div className="flex justify-end mt-3">
+                            <button
+                            onClick={() => deleteChat(chat._id)}
+                            className="text-gray-400 hover:text-red-500"
+                            title="Delete chat"
+                            >
+                            <Trash2 size={16} />
+                            </button>
+                        </div>
+                        </motion.li>
+                    ))}
                     </AnimatePresence>
                 ) : (
-                    <p className="text-gray-500 text-sm text-center mt-10">No chats available</p>
+                    <p className="text-gray-500 text-sm mt-4 text-center">No chats yet.</p>
                 )}
             </ul>
+
         </aside>
     );
 };

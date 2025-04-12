@@ -23,3 +23,7 @@ class MessageModel:
     @staticmethod
     def delete_messages_by_chat(chat_id):
         return MessageModel.collection.delete_many({"chatId": ObjectId(chat_id)})
+    
+    @staticmethod
+    def delete_message_by_id(message_id):
+        return MessageModel.collection.delete_one({"_id": ObjectId(message_id)})

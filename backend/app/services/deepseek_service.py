@@ -153,65 +153,140 @@ def add_documents_to_graph(doc_text_by_page):
     except Exception as e:
         print(f"Error inserting document: {e}")
 
-# Search function
+def fetch_structured_tables():
+    tables = []
+    with driver.session() as session:
+        result = session.run("""
+            MATCH (t:Table)<-[:IN_TABLE]-(r:Row)<-[:IN_ROW]-(c:Cell)
+            RETURN t.title AS title, t.page AS page, r.index AS rowIndex, c.column AS column, c.value AS value
+        """)
+        
+        raw = {}
+        for record in result:
+            title = record["title"]
+            page = record.get("page", 0)
+            row_index = record["rowIndex"]
+            column = record["column"]
+            value = record["value"]
+
+            key = (title, page)
+            raw.setdefault(key, {}).setdefault(row_index, {})[column] = value
+
+        for (title, page), rows_dict in raw.items():
+            sorted_rows = [rows_dict[i] for i in sorted(rows_dict)]
+            if not sorted_rows:
+                continue
+
+            header_row = sorted_rows[0]
+            headers = list(header_row.keys())
+            data_rows = sorted_rows[1:]
+
+            table_text = format_table_for_context(data_rows, headers)
+
+            tables.append({
+                "title": title,
+                "page": page,
+                "text": table_text,
+                "headers": headers,
+                "rows": data_rows
+            })
+
+    return tables
+
+def format_table_for_context(rows, headers):
+    formatted_rows = ["\t".join(headers)]
+    for row in rows:
+        formatted_rows.append("\t".join([str(row.get(h, "")) for h in headers]))
+    return "\n".join(formatted_rows)
+
+
+def format_structured_table(headers, rows):
+    formatted_rows = ["\t".join(headers)]
+    for row in rows:
+        formatted_rows.append("\t".join([str(row.get(h, "")) for h in headers]))
+    return "\n".join(formatted_rows)
+
 def search_context(question, max_tokens=700, similarity_threshold=0.5):
     try:
         question_embedding = embedding_model.encode([question])[0].tolist()
 
+        # Text chunk retrieval
         with driver.session() as session:
-            query = """
-            MATCH (d:Document)
-            RETURN d.text AS text, d.embedding AS embedding, d.page AS page, d.chunk_index AS chunk_index
-            """
-            result = session.run(query)
-
-            chunks = []
-            embeddings = []
-
+            result = session.run("""
+                MATCH (d:Document)
+                RETURN d.text AS text, d.embedding AS embedding, d.page AS page, d.chunk_index AS chunk_index
+            """)
+            chunks, embeddings = [], []
             for record in result:
                 embedding = record["embedding"]
-                text = record["text"]
+                if embedding and isinstance(embedding, list) and not any(np.isnan(embedding)):
+                    chunks.append({
+                        "text": record["text"],
+                        "embedding": embedding,
+                        "page": record.get("page", 0),
+                        "chunk_index": record.get("chunk_index", 0)
+                    })
+                    embeddings.append(embedding)
 
-                if embedding is None or not isinstance(embedding, list) or any(np.isnan(embedding)):
-                    continue
+        # Structured table embedding
+        tables = fetch_structured_tables()
 
-                chunks.append({
-                    "text": text,
-                    "embedding": embedding,
-                    "page": record.get("page", 0),
-                    "chunk_index": record.get("chunk_index", 0)
-                })
-                embeddings.append(embedding)
+        print("Tables: ", tables)
+        table_embeddings = [embedding_model.encode([table["text"]])[0].tolist() for table in tables]
 
-            if not chunks:
-                return "No relevant content in the graph."
-
+        # Score text chunks
+        text_scores = []
+        if embeddings:
             similarities = cosine_similarity([question_embedding], embeddings)[0]
-
-            # Score with both cosine and fuzzy ratio
-            scored_chunks = []
             for i, chunk in enumerate(chunks):
                 if similarities[i] >= similarity_threshold:
                     fuzzy_score = fuzz.partial_ratio(question.lower(), chunk["text"].lower()) / 100
-                    final_score = (0.75 * similarities[i]) + (0.25 * fuzzy_score)
-                    scored_chunks.append((chunk, final_score))
+                    final_score = 0.8 * similarities[i] + 0.2 * fuzzy_score
+                    text_scores.append((chunk["text"], final_score))
 
-            scored_chunks.sort(key=lambda x: x[1], reverse=True)
+        # Score tables
+        table_scores = []
+        if table_embeddings:
+            similarities = cosine_similarity([question_embedding], table_embeddings)[0]
+            for i, table in enumerate(tables):
+                if similarities[i] >= similarity_threshold:
+                    fuzzy_score = fuzz.partial_ratio(question.lower(), table["text"].lower()) / 100
+                    header_score = fuzz.partial_ratio(question.lower(), " ".join(table["headers"]).lower()) / 100
+                    final_score = 0.7 * similarities[i] + 0.2 * fuzzy_score + 0.1 * header_score
+                    table_scores.append((
+                        {
+                            "type": "table",
+                            "title": table["title"],
+                            "page": table["page"],
+                            "headers": table["headers"],
+                            "rows": table["rows"]
+                        },
+                        final_score
+                    ))
 
-            # Select top chunks until max token budget is reached
-            context = []
-            current_tokens = 0
-            for chunk, _ in scored_chunks:
-                word_count = len(chunk["text"].split())
+        all_scores = text_scores + table_scores
+        all_scores.sort(key=lambda x: x[1], reverse=True)
+
+        # Build token-bounded context
+        context = []
+        current_tokens = 0
+        for item, _ in all_scores:
+            if isinstance(item, str):
+                word_count = len(item.split())
                 if current_tokens + word_count > max_tokens:
                     break
-                context.append(chunk["text"])
+                context.append(item)
+                current_tokens += word_count
+            elif isinstance(item, dict) and item.get("type") == "table":
+                table_str = format_structured_table(item["headers"], item["rows"])
+                block = f"[Table: {item['title']} (Page {item['page']})]\n{table_str}"
+                word_count = len(block.split())
+                if current_tokens + word_count > max_tokens:
+                    break
+                context.append(block)
                 current_tokens += word_count
 
-            if not context:
-                return "No relevant information found."
-
-            return "\n\n".join(context)
+        return "\n\n".join(context) if context else "No relevant information found."
 
     except Exception as e:
         return f"Error in search: {e}"
@@ -255,22 +330,22 @@ def evaluate_and_store(sample_dict):
 def generate_response(question, ground_truth=None):
     context = search_context(question)
     print(f"Context found: {context}")
-    prompt_with_context = f"Based on the following context, provide a direct and concise answer.\n\nContext: {context}\n\nQuestion: {question}\n\n"
-    prompt_without_context = f"Provide a direct and concise answer.\n\nQuestion: {question}\n\n"
+    prompt_for_short_answer = f"Based on the following context, provide a direct and concise answer.\n\nContext: {context}\n\nQuestion: {question}\n\n"
+    prompt_for_detailed_answer = f"Provide a detailed and well explained answer..\n\nContext: {context}\n\nQuestion: {question}\n\n"
 
-    response_with_context = remove_think_tags(run_ollama(prompt_with_context)) if context else "No relevant context found."
-    response_without_context = remove_think_tags(run_ollama(prompt_without_context))
+    response_short = remove_think_tags(run_ollama(prompt_for_short_answer)) if context else "No relevant context found."
+    response_detailed = remove_think_tags(run_ollama(prompt_for_detailed_answer))
 
     # cleaned_ground_truth = clean_ground_truth(ground_truth)
 
     if (
         context and context.strip().lower() != "no relevant context found."
         and isinstance(question, str) and question.strip()
-        and isinstance(response_with_context, str) and response_with_context.strip()
+        and isinstance(response_detailed, str) and response_detailed.strip()
     ):
         sample = {
             "question": question.strip(),
-            "answer": response_with_context.strip(),
+            "answer": response_detailed.strip(),
             "contexts": [context.strip()],
             "ground_truth": clean_ground_truth(ground_truth)
         }
@@ -278,8 +353,9 @@ def generate_response(question, ground_truth=None):
     else:
         print(f"Skipped logging: Invalid or missing data for question: '{question}'")
 
-    print(response_without_context)
-    return response_with_context
+    print(prompt_for_detailed_answer)
+
+    return {"response_short" : response_short, "response_detailed" : response_detailed}
 
 
 def run_ollama(prompt):
