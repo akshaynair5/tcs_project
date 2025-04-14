@@ -1,9 +1,53 @@
-import { useState } from "react";
-import { Send } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import { Send, Mic, MicOff } from "lucide-react";
 import { motion } from "framer-motion";
 
 const ChatInput = ({ onSend }) => {
   const [message, setMessage] = useState("");
+  const [listening, setListening] = useState(false);
+  const recognitionRef = useRef(null);
+
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      alert("Speech Recognition is not supported in this browser.");
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = "en-US";
+
+    recognition.onresult = (event) => {
+      let interimTranscript = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript;
+        if (event.results[i].isFinal) {
+          setMessage((prev) => prev + transcript);
+        } else {
+          interimTranscript += transcript;
+        }
+      }
+    };
+
+    recognition.onend = () => {
+      setListening(false);
+    };
+
+    recognitionRef.current = recognition;
+  }, []);
+
+  const toggleListening = () => {
+    if (listening) {
+      recognitionRef.current?.stop();
+      setListening(false);
+    } else {
+      recognitionRef.current?.start();
+      setListening(true);
+    }
+  };
 
   const handleSend = async () => {
     if (message.trim()) {
@@ -23,6 +67,20 @@ const ChatInput = ({ onSend }) => {
           onChange={(e) => setMessage(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && handleSend()}
         />
+
+        {/* Mic Button */}
+        <motion.button
+          whileTap={{ scale: 0.9 }}
+          whileHover={{ scale: 1.05 }}
+          className={`p-2 rounded-lg transition duration-150 ${
+            listening ? "bg-red-500 hover:bg-red-600" : "bg-green-600 hover:bg-green-700"
+          }`}
+          onClick={toggleListening}
+        >
+          {listening ? <MicOff size={20} color="white" /> : <Mic size={20} color="white" />}
+        </motion.button>
+
+        {/* Send Button */}
         <motion.button
           whileTap={{ scale: 0.9 }}
           whileHover={{ scale: 1.05 }}
