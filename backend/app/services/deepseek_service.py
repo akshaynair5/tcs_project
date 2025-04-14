@@ -33,7 +33,7 @@ NEO4J_URI = os.getenv("NEO4J_URI")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 NEO4J_USER = os.getenv("NEO4J_USERNAME")
 api_key = os.getenv("LLM_API_KEY")
-print(api_key)
+
 # Initialize OpenAI client for OpenRouter
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
