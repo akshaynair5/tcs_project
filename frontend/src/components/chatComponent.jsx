@@ -11,10 +11,12 @@ const ChatComponent = () => {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
   const messagesEndRef = useRef(null);
+  const abortRef = useRef(null);
 
   useEffect(() => {
     if (currentChat && currentChat.messages) {
       setMessages(currentChat.messages);
+      console.log(currentChat.messages);
     }
   }, [currentChat]);
 
@@ -25,29 +27,63 @@ const ChatComponent = () => {
 
   const handleSend = async (input) => {
     if (!input.trim()) return;
-
-    const newMessage = { content: input, role: "user" };
+  
+    const tempId = Date.now().toString();
+    const newMessage = { content: input, role: "user", id: tempId };
     setMessages((prev) => [...prev, newMessage]);
     setLoading(true);
+    
+    // Save abort controller and message id
+    const controller = new AbortController();
+    abortRef.current = { controller, id: tempId };
 
     try {
-      const { data } = await axios.post("http://127.0.0.1:5000/api/ask", {
-        chat_id: currentChat._id,
-        user_id: currentUser.user_id,
-        question: input,
-      });
-
+      const { data } = await axios.post(
+        "http://127.0.0.1:5000/api/ask",
+        {
+          chat_id: currentChat._id,
+          user_id: currentUser.user_id,
+          question: input,
+        },
+        { signal: controller.signal }
+      );
+  
       const assistantMessage = { content: data.answer, role: "ai_assistant" };
       setMessages((prev) => [...prev, assistantMessage]);
     } catch (error) {
-      const errorMessage = {
-        content: error.response?.data?.error || "Something went wrong",
-        role: "ai_assistant",
-      };
-      setMessages((prev) => [...prev, errorMessage]);
+      if (axios.isCancel(error)) {
+        console.log("Request canceled");
+      } else {
+        const errorMessage = {
+          content: error.response?.data?.error || "Something went wrong",
+          role: "ai_assistant",
+        };
+        setMessages((prev) => [...prev, errorMessage]);
+      }
     }
-
+  
     setLoading(false);
+  };
+
+
+  const handleCancel = async () => {
+    setLoading(false);
+  
+    setMessages((prevMessages) => {
+      const updatedMessages = [...prevMessages];
+      const lastMessage = updatedMessages.pop(); // Remove last message
+  
+      // Delete from DB if _id exists
+      if (lastMessage && lastMessage._id) {
+        axios
+          .delete(`http://localhost:5000/api/messages/${lastMessage._id}`)
+          .catch((err) => {
+            console.error("Failed to delete message from DB:", err);
+          });
+      }
+  
+      return updatedMessages;
+    });
   };
 
   return (
@@ -66,14 +102,15 @@ const ChatComponent = () => {
         ))}
 
         {loading && (
-          <motion.div
-            className="text-center text-sm text-gray-400 animate-pulse"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ repeat: Infinity, duration: 1 }}
-          >
-            Typing...
-          </motion.div>
+          <div className="text-center text-sm text-gray-400 animate-pulse">
+            Typing...{" "}
+            {/* <button
+              onClick={handleCancel}
+              className="ml-2 text-red-400 hover:text-red-600 underline"
+            >
+              Cancel
+            </button> */}
+          </div>
         )}
 
         <div ref={messagesEndRef} />

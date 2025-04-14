@@ -5,6 +5,7 @@ import pandas as pd
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
 import os
+from openai import OpenAI
 from pinecone import Pinecone, ServerlessSpec
 import time
 from neo4j import GraphDatabase
@@ -17,6 +18,9 @@ from ragas.metrics import answer_relevancy, faithfulness, context_precision
 import uuid
 import math
 from rapidfuzz import fuzz
+from better_profanity import profanity
+
+profanity.load_censor_words()
 
 
 load_dotenv()
@@ -28,12 +32,16 @@ kw_model = KeyBERT()
 NEO4J_URI = os.getenv("NEO4J_URI")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 NEO4J_USER = os.getenv("NEO4J_USERNAME")
+api_key = os.getenv("LLM_API_KEY")
+print(api_key)
+# Initialize OpenAI client for OpenRouter
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=api_key,
+)
 
 INDEX_NAME = "insurance-data"
-
 driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
-
-
 embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
 
 d = 384 
@@ -153,65 +161,140 @@ def add_documents_to_graph(doc_text_by_page):
     except Exception as e:
         print(f"Error inserting document: {e}")
 
-# Search function
+def fetch_structured_tables():
+    tables = []
+    with driver.session() as session:
+        result = session.run("""
+            MATCH (t:Table)<-[:IN_TABLE]-(r:Row)<-[:IN_ROW]-(c:Cell)
+            RETURN t.title AS title, t.page AS page, r.index AS rowIndex, c.column AS column, c.value AS value
+        """)
+        
+        raw = {}
+        for record in result:
+            title = record["title"]
+            page = record.get("page", 0)
+            row_index = record["rowIndex"]
+            column = record["column"]
+            value = record["value"]
+
+            key = (title, page)
+            raw.setdefault(key, {}).setdefault(row_index, {})[column] = value
+
+        for (title, page), rows_dict in raw.items():
+            sorted_rows = [rows_dict[i] for i in sorted(rows_dict)]
+            if not sorted_rows:
+                continue
+
+            header_row = sorted_rows[0]
+            headers = list(header_row.keys())
+            data_rows = sorted_rows[1:]
+
+            table_text = format_table_for_context(data_rows, headers)
+
+            tables.append({
+                "title": title,
+                "page": page,
+                "text": table_text,
+                "headers": headers,
+                "rows": data_rows
+            })
+
+    return tables
+
+def format_table_for_context(rows, headers):
+    formatted_rows = ["\t".join(headers)]
+    for row in rows:
+        formatted_rows.append("\t".join([str(row.get(h, "")) for h in headers]))
+    return "\n".join(formatted_rows)
+
+
+def format_structured_table(headers, rows):
+    formatted_rows = ["\t".join(headers)]
+    for row in rows:
+        formatted_rows.append("\t".join([str(row.get(h, "")) for h in headers]))
+    return "\n".join(formatted_rows)
+
 def search_context(question, max_tokens=700, similarity_threshold=0.5):
     try:
         question_embedding = embedding_model.encode([question])[0].tolist()
 
+        # Text chunk retrieval
         with driver.session() as session:
-            query = """
-            MATCH (d:Document)
-            RETURN d.text AS text, d.embedding AS embedding, d.page AS page, d.chunk_index AS chunk_index
-            """
-            result = session.run(query)
-
-            chunks = []
-            embeddings = []
-
+            result = session.run("""
+                MATCH (d:Document)
+                RETURN d.text AS text, d.embedding AS embedding, d.page AS page, d.chunk_index AS chunk_index
+            """)
+            chunks, embeddings = [], []
             for record in result:
                 embedding = record["embedding"]
-                text = record["text"]
+                if embedding and isinstance(embedding, list) and not any(np.isnan(embedding)):
+                    chunks.append({
+                        "text": record["text"],
+                        "embedding": embedding,
+                        "page": record.get("page", 0),
+                        "chunk_index": record.get("chunk_index", 0)
+                    })
+                    embeddings.append(embedding)
 
-                if embedding is None or not isinstance(embedding, list) or any(np.isnan(embedding)):
-                    continue
+        # Structured table embedding
+        tables = fetch_structured_tables()
 
-                chunks.append({
-                    "text": text,
-                    "embedding": embedding,
-                    "page": record.get("page", 0),
-                    "chunk_index": record.get("chunk_index", 0)
-                })
-                embeddings.append(embedding)
+        print("Tables: ", tables)
+        table_embeddings = [embedding_model.encode([table["text"]])[0].tolist() for table in tables]
 
-            if not chunks:
-                return "No relevant content in the graph."
-
+        # Score text chunks
+        text_scores = []
+        if embeddings:
             similarities = cosine_similarity([question_embedding], embeddings)[0]
-
-            # Score with both cosine and fuzzy ratio
-            scored_chunks = []
             for i, chunk in enumerate(chunks):
                 if similarities[i] >= similarity_threshold:
                     fuzzy_score = fuzz.partial_ratio(question.lower(), chunk["text"].lower()) / 100
-                    final_score = (0.75 * similarities[i]) + (0.25 * fuzzy_score)
-                    scored_chunks.append((chunk, final_score))
+                    final_score = 0.8 * similarities[i] + 0.2 * fuzzy_score
+                    text_scores.append((chunk["text"], final_score))
 
-            scored_chunks.sort(key=lambda x: x[1], reverse=True)
+        # Score tables
+        table_scores = []
+        if table_embeddings:
+            similarities = cosine_similarity([question_embedding], table_embeddings)[0]
+            for i, table in enumerate(tables):
+                if similarities[i] >= similarity_threshold:
+                    fuzzy_score = fuzz.partial_ratio(question.lower(), table["text"].lower()) / 100
+                    header_score = fuzz.partial_ratio(question.lower(), " ".join(table["headers"]).lower()) / 100
+                    final_score = 0.7 * similarities[i] + 0.2 * fuzzy_score + 0.1 * header_score
+                    table_scores.append((
+                        {
+                            "type": "table",
+                            "title": table["title"],
+                            "page": table["page"],
+                            "headers": table["headers"],
+                            "rows": table["rows"]
+                        },
+                        final_score
+                    ))
 
-            # Select top chunks until max token budget is reached
-            context = []
-            current_tokens = 0
-            for chunk, _ in scored_chunks:
-                word_count = len(chunk["text"].split())
+        all_scores = text_scores + table_scores
+        all_scores.sort(key=lambda x: x[1], reverse=True)
+
+        # Build token-bounded context
+        context = []
+        current_tokens = 0
+        for item, _ in all_scores:
+            if isinstance(item, str):
+                word_count = len(item.split())
                 if current_tokens + word_count > max_tokens:
                     break
-                context.append(chunk["text"])
+                context.append(item)
+                current_tokens += word_count
+            elif isinstance(item, dict) and item.get("type") == "table":
+                table_str = format_structured_table(item["headers"], item["rows"])
+                block = f"[Table: {item['title']} (Page {item['page']})]\n{table_str}"
+                word_count = len(block.split())
+                if current_tokens + word_count > max_tokens:
+                    break
+                context.append(block)
                 current_tokens += word_count
 
-            if not context:
-                return "No relevant information found."
-
-            return "\n\n".join(context)
+        return "\n\n".join(context) if context else "No relevant information found."
 
     except Exception as e:
         return f"Error in search: {e}"
@@ -252,50 +335,131 @@ def evaluate_and_store(sample_dict):
 
     print(f"Evaluation result saved for question: '{sample.user_input}'")
 
-def generate_response(question, ground_truth=None):
+def is_profane(text: str) -> bool:
+    return profanity.contains_profanity(text)
+
+def is_sensitive_or_harmful(text: str) -> bool:
+    # Add minimal regex for malicious/unsafe patterns (expand as needed)
+    harmful_patterns = [
+        r"\b(hack|exploit|bypass|ddos|phish)\b",
+        r"\b(kill|suicide|murder|bomb|terrorist)\b",
+        r"\bpassword|ssn|social security number|credit card\b",
+        r"\bhow to\b.*\bcheat\b",
+        r"\bself[-\s]?harm\b",
+    ]
+    return any(re.search(pat, text, re.IGNORECASE) for pat in harmful_patterns)
+
+def is_out_of_scope(context: str) -> bool:
+    if not context or "no relevant context found" in context.lower():
+        return True
+    # Add a few signals like no keywords or very general context
+    if len(context.split()) < 10:
+        return True
+    return False
+
+def generate_response(question: str, ground_truth=None):
+    if not question or not isinstance(question, str) or len(question.strip()) < 3:
+        return {
+            "response_short": "Invalid input.",
+            "response_detailed": "Your question seems too short or unclear. Please rephrase it with more details."
+        }
+
+    # Step 1: Filter malicious/unsafe content
+    if is_profane(question) or is_sensitive_or_harmful(question):
+        return {
+            "response_short": "Sorry, that question cannot be answered.",
+            "response_detailed": "This assistant cannot respond to questions containing inappropriate or harmful content. Please try again with a different question."
+        }
+
+    # Step 2: Get context
     context = search_context(question)
-    print(f"Context found: {context}")
-    prompt_with_context = f"Based on the following context, provide a direct and concise answer.\n\nContext: {context}\n\nQuestion: {question}\n\n"
-    prompt_without_context = f"Provide a direct and concise answer.\n\nQuestion: {question}\n\n"
+    print("Context found:", context)
 
-    response_with_context = remove_think_tags(run_ollama(prompt_with_context)) if context else "No relevant context found."
-    response_without_context = remove_think_tags(run_ollama(prompt_without_context))
+    # Step 3: If context is missing or not related to insurance
+    if is_out_of_scope(context):
+        suggestion_prompt = f"The user asked: '{question}'. Suggest a rephrased version of this question that would be relevant to insurance topics like policies, claims, coverage, premium, etc."
+        suggestion = remove_think_tags(run_ollama(suggestion_prompt))
+        return {
+            "response_short": "I can only assist with insurance-related questions.",
+            "response_detailed": f"This query appears unrelated to insurance. Try rephrasing your question like this:\n\n**{suggestion.strip()}**"
+        }
 
-    # cleaned_ground_truth = clean_ground_truth(ground_truth)
+    # Step 4: Prompt creation
+    prompt_short = f"Answer concisely:\n\nContext: {context}\n\nQuestion: {question}"
+    prompt_detailed = f"Answer in detail:\n\nContext: {context}\n\nQuestion: {question}"
 
-    if (
-        context and context.strip().lower() != "no relevant context found."
-        and isinstance(question, str) and question.strip()
-        and isinstance(response_with_context, str) and response_with_context.strip()
-    ):
+    # Step 5: LLM responses
+    response_short_raw = run_ollama(prompt_short)
+    response_detailed_raw = run_ollama(prompt_detailed)
+    print(response_detailed_raw)
+    # If the LLM returns an error or timeout message
+    if response_short_raw.startswith("Error") or response_detailed_raw.startswith("Error"):
+        return {
+            "response_short": "Sorry, I'm having trouble generating a response right now.",
+            "response_detailed": f"There was an error while processing your question. Please try again shortly.\n\n{response_detailed_raw}"
+        }
+
+    response_short = remove_think_tags(response_short_raw)
+    response_detailed = remove_think_tags(response_detailed_raw)
+
+    # Step 6: Post-check LLM output for safety
+    if is_profane(response_short + response_detailed) or is_sensitive_or_harmful(response_detailed):
+        return {
+            "response_short": "Content blocked.",
+            "response_detailed": "The assistant generated a response that contains sensitive content and has been filtered. Please try a different question."
+        }
+
+    # Step 7: Optional logging
+    if context and response_detailed.strip():
         sample = {
             "question": question.strip(),
-            "answer": response_with_context.strip(),
+            "answer": response_detailed.strip(),
             "contexts": [context.strip()],
             "ground_truth": clean_ground_truth(ground_truth)
         }
         # evaluate_and_store(sample)
-    else:
-        print(f"Skipped logging: Invalid or missing data for question: '{question}'")
 
-    print(response_without_context)
-    return response_with_context
+    return {
+        "response_short": response_short,
+        "response_detailed": response_detailed
+    }
 
 
 def run_ollama(prompt):
-        """Helper function to run Ollama and fetch a response."""
-        try:
-            result = subprocess.run(
-                ['ollama', 'run', 'deepseek-r1:1.5b', prompt],
-                capture_output=True,
-                text=True,
-                check=True,
-                encoding='utf-8'
-            )
-            return result.stdout.strip()
-        except subprocess.CalledProcessError as e:
-            return f"Command failed with error: {e.stderr}"
-        except FileNotFoundError:
-            return "Error: 'ollama' command not found."
-        except Exception as e:
-            return f"Error: {str(e)}"
+    """Uses OpenRouter to get a response from a hosted LLM model."""
+    try:
+        completion = client.chat.completions.create(
+            model="deepseek/deepseek-chat-v3-0324:free",
+            messages=[{"role": "user", "content": prompt}],
+            timeout=30
+        )
+        print("Raw completion object:", completion)  # Debug line
+
+        # Defensive check
+        message = completion.choices[0].message
+        if not message or not hasattr(message, "content") or not message.content:
+            return "Error: No content generated by the model."
+
+        return message.content.strip()
+
+    except Exception as e:
+        return f"Error during OpenRouter call: {str(e)}"
+
+
+# def run_ollama(prompt):
+#         """Helper function to run Ollama and fetch a response."""
+#         try:
+#             result = subprocess.run(
+#                 ['ollama', 'run', 'deepseek-r1:1.5b', prompt],
+#                 capture_output=True,
+#                 text=True,
+#                 check=True,
+#                 encoding='utf-8'
+#             )
+#             return result.stdout.strip()
+#         except subprocess.CalledProcessError as e:
+#             return f"Command failed with error: {e.stderr}"
+#         except FileNotFoundError:
+#             return "Error: 'ollama' command not found."
+#         except Exception as e:
+#             return f"Error: {str(e)}"
