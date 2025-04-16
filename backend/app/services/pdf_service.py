@@ -1,6 +1,7 @@
 import camelot
 import fitz  # PyMuPDF
 import pytesseract
+# from paddleocr import PaddleOCR
 from PIL import Image
 import io
 import re
@@ -22,6 +23,7 @@ tesseract_path = r"C:\Program Files\Tesseract-OCR"
 tesseract_exe = os.path.join(tesseract_path, "tesseract.exe")
 pytesseract.pytesseract.tesseract_cmd = tesseract_exe
 os.environ["PATH"] += os.pathsep + tesseract_path
+# ocr_engine = PaddleOCR(use_angle_cls=True, lang='en', show_log=False, structure_version='PP-StructureV2')
 
 # Neo4j setup
 NEO4J_URI = os.getenv("NEO4J_URI")
@@ -52,61 +54,83 @@ def camelot_tables_to_json(camelot_tables):
         if df.shape[0] < 2:
             continue
 
-        headers = df.iloc[0].tolist()
-        rows = df.iloc[1:].values.tolist()
+        headers = df.iloc[0].fillna("").tolist()
+        rows = df.iloc[1:].fillna("").values.tolist()
         row_dicts = []
 
         for row in rows:
             row_dict = {}
             for j, header in enumerate(headers):
-                row_dict[header.strip()] = row[j].strip() if j < len(row) else ""
+                clean_header = header.strip() or f"Column_{j+1}"
+                row_dict[clean_header] = row[j].strip() if j < len(row) else ""
             row_dicts.append(row_dict)
 
         structured.append({
+            "table_id": str(uuid.uuid4()),
             "title": f"Table {i + 1}",
-            "headers": [h.strip() for h in headers],
+            "headers": [h.strip() or f"Column_{j+1}" for j, h in enumerate(headers)],
             "rows": row_dicts
         })
-    
+
     print(f"[INFO] Extracted {len(structured)} tables from Camelot.")
     return structured
 
-def add_table_to_neo4j(driver, structured_table, page_number):
+def add_table_to_neo4j(driver, structured_tables, page_number):
     with driver.session() as session:
-        for table in structured_table:
+        for table in structured_tables:
+            table_id = table["table_id"]
             title = table["title"]
             headers = table["headers"]
             rows = table["rows"]
 
-            session.run(
-                "MERGE (t:Table {title: $title, page: $page})",
-                {"title": title, "page": page_number}
-            )
+            # Create the table node
+            session.run("""
+                MERGE (t:Table {table_id: $table_id})
+                SET t.title = $title, t.page = $page
+            """, {
+                "table_id": table_id,
+                "title": title,
+                "page": page_number
+            })
 
+            # Create Column nodes and relationships
+            for i, col_name in enumerate(headers):
+                session.run("""
+                    MATCH (t:Table {table_id: $table_id})
+                    MERGE (c:Column {name: $name})-[:IN_TABLE]->(t)
+                    SET c.index = $index
+                """, {
+                    "table_id": table_id,
+                    "name": col_name,
+                    "index": i
+                })
+
+            # Insert rows and cells
             for i, row in enumerate(rows):
-                session.run(
-                    """
-                    MATCH (t:Table {title: $title, page: $page})
-                    MERGE (r:Row {index: $index})-[:IN_TABLE]->(t)
-                    """,
-                    {"title": title, "page": page_number, "index": i}
-                )
-                for col_name in headers:
-                    cell_value = row.get(col_name, "")
-                    session.run(
-                        """
-                        MATCH (t:Table {title: $title, page: $page})
-                        MATCH (r:Row {index: $index})-[:IN_TABLE]->(t)
-                        CREATE (c:Cell {value: $value, column: $column})-[:IN_ROW]->(r)
-                        """,
-                        {
-                            "title": title,
-                            "page": page_number,
-                            "index": i,
-                            "value": cell_value,
-                            "column": col_name
-                        }
-                    )
+                row_id = str(uuid.uuid4())
+
+                session.run("""
+                    MATCH (t:Table {table_id: $table_id})
+                    CREATE (r:Row {row_id: $row_id, index: $index})-[:IN_TABLE]->(t)
+                """, {
+                    "table_id": table_id,
+                    "row_id": row_id,
+                    "index": i
+                })
+
+                for col_name, cell_value in row.items():
+                    session.run("""
+                        MATCH (r:Row {row_id: $row_id})
+                        MATCH (c:Column {name: $col_name})-[:IN_TABLE]->(:Table {table_id: $table_id})
+                        CREATE (cell:Cell {value: $value, column: $col_name})-[:IN_ROW]->(r)
+                        CREATE (cell)-[:IN_COLUMN]->(c)
+                    """, {
+                        "table_id": table_id,
+                        "row_id": row_id,
+                        "col_name": col_name,
+                        "value": cell_value
+                    })
+
 
 # ========== PDF Extraction ========== #
 
@@ -118,7 +142,7 @@ def extract_text_and_tables_from_pdf(pdf_path):
         for page_num, page in enumerate(doc):
             combined_text = f"\n--- Page {page_num + 1} ---\n"
 
-            # Extract and structure plain text
+            # Extract plain text using layout blocks
             try:
                 blocks = page.get_text("blocks")
                 blocks.sort(key=lambda b: (round(b[1]), b[0]))
@@ -128,7 +152,8 @@ def extract_text_and_tables_from_pdf(pdf_path):
             except Exception as e:
                 print(f"[ERROR] Text extraction failed on page {page_num + 1}: {e}")
 
-            # Extract tables with Camelot
+            # Table extraction using Camelot
+            camelot_extracted = False
             try:
                 camelot_tables = camelot.read_pdf(
                     pdf_path,
@@ -136,16 +161,30 @@ def extract_text_and_tables_from_pdf(pdf_path):
                     flavor='lattice',
                     strip_text='\n'
                 )
-                table_json = camelot_tables_to_json(camelot_tables)
-                structured_tables.append(table_json)
+                if camelot_tables and len(camelot_tables) > 0:
+                    table_json = camelot_tables_to_json(camelot_tables)
+                    structured_tables.append(table_json)
+                    for i, t in enumerate(camelot_tables):
+                        combined_text += f"\n[Table {i + 1} - Camelot]:\n{t.df.to_string(index=False)}\n"
+                    camelot_extracted = True
+                else:
+                    raise ValueError("No tables found by Camelot.")
+            except Exception as camelot_error:
+                print(f"[WARNING] Camelot table extraction failed or returned no tables on page {page_num + 1}: {camelot_error}")
 
-                for i, t in enumerate(camelot_tables):
-                    combined_text += f"\n[Table {i + 1}]:\n{t.df.to_string(index=False)}\n"
-            except Exception as table_error:
-                print(f"[ERROR] Camelot table extraction failed on page {page_num + 1}: {table_error}")
-                structured_tables.append([])
+            # Fallback to PaddleOCR table detection if Camelot fails
+            # if not camelot_extracted:
+            #     try:
+            #         pix = page.get_pixmap()
+            #         image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            #         result = ocr_engine.ocr(image, cls=True, det=True, rec=True, structure=True)
+            #         structured_tables.append(result)
+            #         combined_text += f"\n[PaddleOCR Table - Fallback]:\n{json.dumps(result, indent=2)}\n"
+            #     except Exception as paddle_error:
+            #         print(f"[ERROR] PaddleOCR failed on page {page_num + 1}: {paddle_error}")
+            #         structured_tables.append([])
 
-            # Image OCR + SmolDocling
+            # OCR text from images in the page
             for img_index, img in enumerate(page.get_images(full=True)):
                 try:
                     xref = img[0]

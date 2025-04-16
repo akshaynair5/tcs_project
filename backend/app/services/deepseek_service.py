@@ -168,7 +168,7 @@ def fetch_structured_tables():
             MATCH (t:Table)<-[:IN_TABLE]-(r:Row)<-[:IN_ROW]-(c:Cell)
             RETURN t.title AS title, t.page AS page, r.index AS rowIndex, c.column AS column, c.value AS value
         """)
-        
+
         raw = {}
         for record in result:
             title = record["title"]
@@ -249,7 +249,7 @@ def search_context(question, max_tokens=700, similarity_threshold=0.5):
             for i, chunk in enumerate(chunks):
                 if similarities[i] >= similarity_threshold:
                     fuzzy_score = fuzz.partial_ratio(question.lower(), chunk["text"].lower()) / 100
-                    final_score = 0.8 * similarities[i] + 0.2 * fuzzy_score
+                    final_score = 0.6 * similarities[i] + 0.4 * fuzzy_score
                     text_scores.append((chunk["text"], final_score))
 
         # Score tables
@@ -260,7 +260,7 @@ def search_context(question, max_tokens=700, similarity_threshold=0.5):
                 if similarities[i] >= similarity_threshold:
                     fuzzy_score = fuzz.partial_ratio(question.lower(), table["text"].lower()) / 100
                     header_score = fuzz.partial_ratio(question.lower(), " ".join(table["headers"]).lower()) / 100
-                    final_score = 0.7 * similarities[i] + 0.2 * fuzzy_score + 0.1 * header_score
+                    final_score = 0.6 * similarities[i] + 0.4 * fuzzy_score + 0.1 * header_score
                     table_scores.append((
                         {
                             "type": "table",
