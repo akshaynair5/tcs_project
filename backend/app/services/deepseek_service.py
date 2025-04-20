@@ -1,4 +1,3 @@
-import subprocess
 import re
 import numpy as np
 import pandas as pd
@@ -7,7 +6,8 @@ from dotenv import load_dotenv
 import os
 from openai import OpenAI
 from pinecone import Pinecone, ServerlessSpec
-import time
+from bson import ObjectId
+from app.models.message_model import MessageModel
 from neo4j import GraphDatabase
 import spacy
 from keybert import KeyBERT
@@ -16,9 +16,12 @@ from ragas import SingleTurnSample
 from ragas.evaluation import evaluate
 from ragas.metrics import answer_relevancy, faithfulness, context_precision
 import uuid
+import hashlib
 import math
 from rapidfuzz import fuzz
 from better_profanity import profanity
+from google import genai
+import logging
 
 profanity.load_censor_words()
 
@@ -66,29 +69,37 @@ def extract_keywords(text, top_n=5):
     doc = nlp(text)
     keywords = set()
 
+    # Named Entities
+    keywords.update(ent.text.lower() for ent in doc.ents if ent.label_ in {"ORG", "PRODUCT", "PERSON", "NORP", "FAC", "GPE", "LOC"})
 
-    for ent in doc.ents:
-        keywords.add(ent.text.lower())  
-    for token in doc:
-        if token.pos_ in ["NOUN", "PROPN"] and token.is_alpha:
-            keywords.add(token.text.lower())
+    # Nouns and Proper Nouns
+    keywords.update(token.text.lower() for token in doc if token.pos_ in {"NOUN", "PROPN"} and token.is_alpha)
 
-
-    bert_keywords = kw_model.extract_keywords(text, keyphrase_ngram_range=(1,2), stop_words='english')
-    keywords.update([kw[0] for kw in bert_keywords[:top_n]])  # Add extracted terms
+    # BERT Keywords
+    bert_keywords = kw_model.extract_keywords(text, keyphrase_ngram_range=(1, 2), stop_words='english')
+    keywords.update(kw[0].lower() for kw in bert_keywords[:top_n])
 
     return list(keywords)
 
+def lemmatize(keyword):
+    doc = nlp(keyword.lower())
+    return " ".join([token.lemma_ for token in doc if not token.is_punct and not token.is_space])
+
+def generate_deterministic_uuid(text):
+    """Generate UUID based on the SHA-1 hash of the chunk."""
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, hashlib.sha1(text.encode()).hexdigest()))
+
 def find_similar_keywords(keywords, threshold=0.7):
-    """Finds similar keywords based on cosine similarity to avoid redundancy."""
-    vectors = embedding_model.encode(keywords) 
+    """Finds similar keywords based on cosine similarity after lemmatizing."""
+    lemmatized_keywords = [lemmatize(k) for k in keywords]
+    vectors = embedding_model.encode(lemmatized_keywords)
     sim_matrix = cosine_similarity(vectors)
 
     related_keywords = {}
     for i, keyword in enumerate(keywords):
         related_keywords[keyword] = [
             keywords[j] for j in range(len(keywords))
-            if sim_matrix[i][j] > threshold and i != j 
+            if sim_matrix[i][j] > threshold and i != j
         ]
     
     return related_keywords
@@ -124,19 +135,31 @@ def add_documents_to_graph(doc_text_by_page):
 
                 for index, chunk in enumerate(chunks):
                     embedding = embedding_model.encode([chunk])[0].tolist()
-                    doc_id = str(uuid.uuid4())
+                    doc_id = generate_deterministic_uuid(chunk)
+
                     extracted_keywords = extract_keywords(chunk)
+                    if not extracted_keywords:
+                        continue
+
                     similar_keywords = find_similar_keywords(extracted_keywords)
 
-                    for keyword in extracted_keywords:
-                        add_insurance_type_if_new(keyword)
+                    # Deduplicate keywords with lemmatization
+                    lemmatized_map = {keyword: lemmatize(keyword) for keyword in extracted_keywords}
+                    unique_lemmas = set(lemmatized_map.values())
 
+                    for keyword in extracted_keywords:
+                        original_keyword = keyword
+                        lemmatized_keyword = lemmatized_map[keyword]
+                        add_insurance_type_if_new(lemmatized_keyword)
+
+                        # Create document and link to insurance type
                         session.run("""
                             MERGE (d:Document {id: $id})
-                            SET d.text = $text,
-                                d.embedding = $embedding,
-                                d.page = $page,
-                                d.chunk_index = $chunk_index
+                            ON CREATE SET d.text = $text,
+                                          d.embedding = $embedding,
+                                          d.page = $page,
+                                          d.chunk_index = $chunk_index
+
                             MERGE (t:InsuranceType {name: $type})
                             MERGE (d)-[:BELONGS_TO]->(t)
                         """, {
@@ -145,19 +168,24 @@ def add_documents_to_graph(doc_text_by_page):
                             "embedding": embedding,
                             "page": page_num,
                             "chunk_index": index,
-                            "type": keyword
+                            "type": lemmatized_keyword
                         })
 
-                        for related_keyword in similar_keywords.get(keyword, []):
-                            session.run("""
-                                MATCH (t1:InsuranceType {name: $keyword}),
-                                      (t2:InsuranceType {name: $related_keyword})
-                                MERGE (t1)-[:RELATED_TO]->(t2)
-                                MERGE (t2)-[:RELATED_TO]->(t1)
-                            """, keyword=keyword, related_keyword=related_keyword)
+                        # Connect related insurance types (bi-directional)
+                        for related_keyword in similar_keywords.get(original_keyword, []):
+                            related_lemma = lemmatized_map.get(related_keyword, lemmatize(related_keyword))
+                            if lemmatized_keyword != related_lemma:
+                                session.run("""
+                                    MATCH (t1:InsuranceType {name: $kw1}),
+                                          (t2:InsuranceType {name: $kw2})
+                                    MERGE (t1)-[:RELATED_TO]->(t2)
+                                    MERGE (t2)-[:RELATED_TO]->(t1)
+                                """, {
+                                    "kw1": lemmatized_keyword,
+                                    "kw2": related_lemma
+                                })
 
         print("Document chunks inserted with metadata successfully.")
-
     except Exception as e:
         print(f"Error inserting document: {e}")
 
@@ -214,11 +242,19 @@ def format_structured_table(headers, rows):
         formatted_rows.append("\t".join([str(row.get(h, "")) for h in headers]))
     return "\n".join(formatted_rows)
 
+def normalize_score(score, min_val=0, max_val=1):
+    """Clamp and normalize a score between min and max."""
+    return max(min(score, max_val), min_val)
+
+def format_table_block(table):
+    """Format structured table into a human-readable string block."""
+    formatted = format_structured_table(table["headers"], table["rows"])
+    return f"[Table: {table['title']} (Page {table['page']})]\n{formatted}"
+
 def search_context(question, max_tokens=700, similarity_threshold=0.5):
     try:
         question_embedding = embedding_model.encode([question])[0].tolist()
 
-        # Text chunk retrieval
         with driver.session() as session:
             result = session.run("""
                 MATCH (d:Document)
@@ -227,7 +263,7 @@ def search_context(question, max_tokens=700, similarity_threshold=0.5):
             chunks, embeddings = [], []
             for record in result:
                 embedding = record["embedding"]
-                if embedding and isinstance(embedding, list) and not any(np.isnan(embedding)):
+                if isinstance(embedding, list) and not any(np.isnan(embedding)):
                     chunks.append({
                         "text": record["text"],
                         "embedding": embedding,
@@ -236,69 +272,59 @@ def search_context(question, max_tokens=700, similarity_threshold=0.5):
                     })
                     embeddings.append(embedding)
 
-        # Structured table embedding
         tables = fetch_structured_tables()
+        table_embeddings = []
+        for table in tables:
+            try:
+                table_embeddings.append(embedding_model.encode([table["text"]])[0].tolist())
+            except Exception as e:
+                logging.warning(f"Embedding error for table on page {table.get('page')}: {e}")
+                continue
 
-        print("Tables: ", tables)
-        table_embeddings = [embedding_model.encode([table["text"]])[0].tolist() for table in tables]
-
-        # Score text chunks
         text_scores = []
         if embeddings:
-            similarities = cosine_similarity([question_embedding], embeddings)[0]
+            text_similarities = cosine_similarity([question_embedding], embeddings)[0]
             for i, chunk in enumerate(chunks):
-                if similarities[i] >= similarity_threshold:
-                    fuzzy_score = fuzz.partial_ratio(question.lower(), chunk["text"].lower()) / 100
-                    final_score = 0.6 * similarities[i] + 0.4 * fuzzy_score
+                sim_score = normalize_score(text_similarities[i])
+                if sim_score >= similarity_threshold:
+                    fuzz_score = fuzz.partial_ratio(question.lower(), chunk["text"].lower()) / 100
+                    final_score = round(0.7 * sim_score + 0.3 * fuzz_score, 4)
                     text_scores.append((chunk["text"], final_score))
 
-        # Score tables
         table_scores = []
         if table_embeddings:
-            similarities = cosine_similarity([question_embedding], table_embeddings)[0]
+            table_similarities = cosine_similarity([question_embedding], table_embeddings)[0]
             for i, table in enumerate(tables):
-                if similarities[i] >= similarity_threshold:
-                    fuzzy_score = fuzz.partial_ratio(question.lower(), table["text"].lower()) / 100
+                sim_score = normalize_score(table_similarities[i])
+                if sim_score >= similarity_threshold:
+                    fuzz_score = fuzz.partial_ratio(question.lower(), table["text"].lower()) / 100
                     header_score = fuzz.partial_ratio(question.lower(), " ".join(table["headers"]).lower()) / 100
-                    final_score = 0.6 * similarities[i] + 0.4 * fuzzy_score + 0.1 * header_score
-                    table_scores.append((
-                        {
-                            "type": "table",
-                            "title": table["title"],
-                            "page": table["page"],
-                            "headers": table["headers"],
-                            "rows": table["rows"]
-                        },
-                        final_score
-                    ))
+                    final_score = round(0.6 * sim_score + 0.3 * fuzz_score + 0.1 * (header_score / 100), 4)
+                    table_scores.append((table, final_score))
 
-        all_scores = text_scores + table_scores
+        all_scores = text_scores + [(format_table_block(t), s) for t, s in table_scores]
         all_scores.sort(key=lambda x: x[1], reverse=True)
 
-        # Build token-bounded context
         context = []
-        current_tokens = 0
-        for item, _ in all_scores:
+        token_count = 0
+        seen_texts = set()
+
+        for item, score in all_scores:
             if isinstance(item, str):
+                if item in seen_texts:
+                    continue
                 word_count = len(item.split())
-                if current_tokens + word_count > max_tokens:
+                if token_count + word_count > max_tokens:
                     break
                 context.append(item)
-                current_tokens += word_count
-            elif isinstance(item, dict) and item.get("type") == "table":
-                table_str = format_structured_table(item["headers"], item["rows"])
-                block = f"[Table: {item['title']} (Page {item['page']})]\n{table_str}"
-                word_count = len(block.split())
-                if current_tokens + word_count > max_tokens:
-                    break
-                context.append(block)
-                current_tokens += word_count
+                seen_texts.add(item)
+                token_count += word_count
 
         return "\n\n".join(context) if context else "No relevant information found."
 
     except Exception as e:
+        logging.exception("Error occurred during context search.")
         return f"Error in search: {e}"
-
 
 def remove_think_tags(text):
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
@@ -335,81 +361,75 @@ def evaluate_and_store(sample_dict):
 
     print(f"Evaluation result saved for question: '{sample.user_input}'")
 
-def is_profane(text: str) -> bool:
-    return profanity.contains_profanity(text)
+def generate_response(question: str, chat_id=None, ground_truth=None):
+    def default_response(short_msg, detailed_msg):
+        return {
+            "response_short": short_msg,
+            "response_detailed": detailed_msg
+        }
 
-def is_sensitive_or_harmful(text: str) -> bool:
-    # Add minimal regex for malicious/unsafe patterns (expand as needed)
-    harmful_patterns = [
-        r"\b(hack|exploit|bypass|ddos|phish)\b",
-        r"\b(kill|suicide|murder|bomb|terrorist)\b",
-        r"\bpassword|ssn|social security number|credit card\b",
-        r"\bhow to\b.*\bcheat\b",
-        r"\bself[-\s]?harm\b",
-    ]
-    return any(re.search(pat, text, re.IGNORECASE) for pat in harmful_patterns)
-
-def is_out_of_scope(context: str) -> bool:
-    if not context or "no relevant context found" in context.lower():
-        return True
-    # Add a few signals like no keywords or very general context
-    if len(context.split()) < 10:
-        return True
-    return False
-
-def generate_response(question: str, ground_truth=None):
     if not question or not isinstance(question, str) or len(question.strip()) < 3:
-        return {
-            "response_short": "Invalid input.",
-            "response_detailed": "Your question seems too short or unclear. Please rephrase it with more details."
-        }
+        return default_response("Invalid input.", "Please provide a clearer and more detailed question.")
 
-    # Step 1: Filter malicious/unsafe content
-    if is_profane(question) or is_sensitive_or_harmful(question):
-        return {
-            "response_short": "Sorry, that question cannot be answered.",
-            "response_detailed": "This assistant cannot respond to questions containing inappropriate or harmful content. Please try again with a different question."
-        }
+    # Step 1: Collect minimal, relevant chat history
+    history_snippets = []
+    if chat_id:
+        try:
+            messages = MessageModel.collection.find({"chatId": ObjectId(chat_id)}).sort("timestamp", -1).limit(6)
+            for msg in reversed(list(messages)):
+                role = msg.get("role", "User").capitalize()
+                content = msg.get("content", "")
+                message_text = content.get("response_short") if (role.lower() == "assistant" and isinstance(content, dict)) else str(content)
+                if message_text.strip():
+                    history_snippets.append(f"{role}: {message_text.strip()}")
+        except Exception as e:
+            print(f"[History Fetch Error] {e}")
 
-    # Step 2: Get context
-    context = search_context(question)
+    short_history = "\n".join(history_snippets[-3:])  # Only last 3 entries for brevity
+
+    # Step 2: Rewrite question using minimal history
+    rewrite_prompt = f"""You are an assistant helping users with insurance-related queries.
+
+    Given the minimal chat history and the user's question, rewrite it to be clear and specific.
+
+    Chat:
+    {short_history}
+
+    User Question: {question}
+
+    REWRITTEN QUESTION:"""
+
+    rewritten_question = run_ollama(rewrite_prompt).strip()
+
+    # Step 3: Search context using rewritten question
+    context = search_context(rewritten_question)
     print("Context found:", context)
 
-    # Step 3: If context is missing or not related to insurance
-    if is_out_of_scope(context):
-        suggestion_prompt = f"The user asked: '{question}'. Suggest a rephrased version of this question that would be relevant to insurance topics like policies, claims, coverage, premium, etc."
-        suggestion = remove_think_tags(run_ollama(suggestion_prompt))
-        return {
-            "response_short": "I can only assist with insurance-related questions.",
-            "response_detailed": f"This query appears unrelated to insurance. Try rephrasing your question like this:\n\n**{suggestion.strip()}**"
-        }
+    # Step 4: Build intelligent prompt (with moderation)
+    def build_prompt(mode: str, q: str):
+        tone = "briefly" if mode == "short" else "in detail"
+        return f"""You are a helpful and professional assistant specializing in insurance.
 
-    # Step 4: Prompt creation
-    prompt_short = f"Answer concisely:\n\nContext: {context}\n\nQuestion: {question}"
-    prompt_detailed = f"Answer in detail:\n\nContext: {context}\n\nQuestion: {question}"
+    Answer the user's question {tone} using the context and chat history provided.
 
-    # Step 5: LLM responses
-    response_short_raw = run_ollama(prompt_short)
-    response_detailed_raw = run_ollama(prompt_detailed)
-    print(response_detailed_raw)
-    # If the LLM returns an error or timeout message
-    if response_short_raw.startswith("Error") or response_detailed_raw.startswith("Error"):
-        return {
-            "response_short": "Sorry, I'm having trouble generating a response right now.",
-            "response_detailed": f"There was an error while processing your question. Please try again shortly.\n\n{response_detailed_raw}"
-        }
+    ⚠️ If the question is inappropriate, offensive, unrelated to insurance, or asks for content that is harmful, illegal, or unethical — politely decline to answer.
 
-    response_short = remove_think_tags(response_short_raw)
-    response_detailed = remove_think_tags(response_detailed_raw)
+    Chat:
+    {short_history}
 
-    # Step 6: Post-check LLM output for safety
-    if is_profane(response_short + response_detailed) or is_sensitive_or_harmful(response_detailed):
-        return {
-            "response_short": "Content blocked.",
-            "response_detailed": "The assistant generated a response that contains sensitive content and has been filtered. Please try a different question."
-        }
+    Context: {context}
 
-    # Step 7: Optional logging
+    User Question: {q}
+    """
+
+    # Step 5: Generate both answers
+    response_short = remove_think_tags(run_ollama(build_prompt("short", rewritten_question)))
+    if not response_short or response_short.lower().startswith("error"):
+        return default_response("Temporarily unavailable.", "There was a processing error. Please try again shortly.")
+
+    response_detailed = remove_think_tags(run_ollama(build_prompt("detailed", rewritten_question)))
+
+    # Step 6: Save for evaluation
     if context and response_detailed.strip():
         sample = {
             "question": question.strip(),
@@ -425,25 +445,47 @@ def generate_response(question: str, ground_truth=None):
     }
 
 
-def run_ollama(prompt):
-    """Uses OpenRouter to get a response from a hosted LLM model."""
-    try:
-        completion = client.chat.completions.create(
-            model="deepseek/deepseek-chat-v3-0324:free",
-            messages=[{"role": "user", "content": prompt}],
-            timeout=30
-        )
-        print("Raw completion object:", completion)  # Debug line
 
-        # Defensive check
-        message = completion.choices[0].message
-        if not message or not hasattr(message, "content") or not message.content:
+def run_ollama(prompt):
+    """Robust LLM API caller using Google Gemini model."""
+    try:
+        client = genai.Client(api_key=api_key)
+
+        response = client.models.generate_content(
+            model="gemini-2.0-flash", contents=prompt
+        )
+
+        if not hasattr(response, "text") or not response.text:
             return "Error: No content generated by the model."
 
-        return message.content.strip()
+        return response.text.strip()
 
     except Exception as e:
-        return f"Error during OpenRouter call: {str(e)}"
+        print(f"[LLM Error] {str(e)}")
+        return f"Error during Gemini call: {str(e)}"
+
+
+# def run_ollama(prompt):
+#     """Robust LLM API caller using OpenRouter."""
+#     try:
+#         completion = client.chat.completions.create(
+#             model="deepseek/deepseek-r1-zero:free",
+#             messages=[{"role": "user", "content": prompt}],
+#         )
+#         print("Raw completion object:", completion)
+
+#         if not hasattr(completion, "choices") or not completion.choices:
+#             return "Error: No choices returned from model."
+
+#         message = completion.choices[0].message
+#         if not message or not hasattr(message, "content") or not message.content:
+#             return "Error: No content generated by the model."
+
+#         return message.content.strip()
+
+#     except Exception as e:
+#         print(f"[LLM Error] {str(e)}")
+#         return f"Error during OpenRouter call: {str(e)}"
 
 
 # def run_ollama(prompt):

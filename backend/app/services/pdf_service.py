@@ -199,15 +199,6 @@ def extract_text_and_tables_from_pdf(pdf_path):
                     except Exception as ocr_error:
                         print(f"[ERROR] OCR failed on page {page_num + 1}: {ocr_error}")
 
-                    try:
-                        inputs = processor(image, return_tensors="pt")
-                        outputs = model.generate(**inputs)
-                        smol_text = processor.batch_decode(outputs, skip_special_tokens=True)[0]
-                        if smol_text.strip():
-                            combined_text += f"\n[SmolDocling Table {img_index}]:\n{smol_text.strip()}\n"
-                    except Exception as smol_error:
-                        print(f"[ERROR] SmolDocling failed on page {page_num + 1}: {smol_error}")
-
                 except Exception as img_error:
                     print(f"[ERROR] Image extraction failed on page {page_num + 1}: {img_error}")
 
