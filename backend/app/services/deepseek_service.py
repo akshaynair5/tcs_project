@@ -22,6 +22,7 @@ from rapidfuzz import fuzz
 from better_profanity import profanity
 from google import genai
 import logging
+from bert_score import score as bert_score
 
 profanity.load_censor_words()
 
@@ -329,6 +330,34 @@ def search_context(question, max_tokens=700, similarity_threshold=0.5):
 def remove_think_tags(text):
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
+def judge_faithfulness_and_context(sample):
+    """Use Gemini to judge faithfulness and context use via `run_ollama`."""
+    judge_prompt = f"""
+You are an evaluator.
+
+Given:
+- Question: {sample.user_input}
+- Answer: {sample.response}
+- Ground Truth (if any): {sample.reference or "N/A"}
+- Context: {sample.retrieved_contexts[0]}
+
+Evaluate:
+1. Is the answer faithful to the context?
+2. Does the answer use the context effectively?
+
+Respond in JSON like:
+{{
+  "faithfulness": "Yes" or "No",
+  "context_use": "Good", "Fair", or "Poor"
+}}
+"""
+    judge_output = run_ollama(judge_prompt)
+    try:
+        parsed = json.loads(judge_output)
+    except Exception:
+        parsed = {"faithfulness": "Unknown", "context_use": "Unknown"}
+    return parsed
+
 def evaluate_and_store(sample_dict):
     df = pd.DataFrame([sample_dict])
 
@@ -336,7 +365,7 @@ def evaluate_and_store(sample_dict):
     df = df[df['contexts'].apply(lambda x: isinstance(x, list) and all(isinstance(c, str) and c.strip() for c in x))]
     df = df[df['question'].apply(lambda x: isinstance(x, str) and x.strip() != "")]
     df = df[df['answer'].apply(lambda x: isinstance(x, str) and x.strip() != "")]
-    
+
     if 'ground_truth' in df.columns:
         df['ground_truth'] = df['ground_truth'].apply(lambda x: x if isinstance(x, str) and x.strip() else None)
 
@@ -351,15 +380,33 @@ def evaluate_and_store(sample_dict):
         reference=df.iloc[0].get('ground_truth')
     )
 
-    results = evaluate([sample], metrics=[answer_relevancy, faithfulness, context_precision])
-    results_df = results.to_pandas()
+    # Compute BERTScore (for relevance)
+    P, R, F1 = bert_score([sample.response], [sample.reference or sample.user_input], lang='en')
+    relevance_score = round(F1[0].item(), 4)
+
+    # Judge with Gemini (for faithfulness and context use)
+    judgments = judge_faithfulness_and_context(sample)
+
+    result_entry = {
+        "question": sample.user_input,
+        "answer": sample.response,
+        "ground_truth": sample.reference or "",
+        "context": sample.retrieved_contexts[0],
+        "relevance_score": relevance_score,
+        "faithfulness": judgments.get("faithfulness", "Unknown"),
+        "context_use": judgments.get("context_use", "Unknown"),
+        "sample_id": str(uuid.uuid4())
+    }
+
+    # Save to CSV
+    results_df = pd.DataFrame([result_entry])
 
     if not os.path.exists(EVALUATION_CSV_PATH):
         results_df.to_csv(EVALUATION_CSV_PATH, index=False)
     else:
         results_df.to_csv(EVALUATION_CSV_PATH, mode='a', header=False, index=False)
 
-    print(f"Evaluation result saved for question: '{sample.user_input}'")
+    print(f"✅ Evaluation result saved for question: '{sample.user_input}'")
 
 def generate_response(question: str, chat_id=None, ground_truth=None):
     def default_response(short_msg, detailed_msg):
@@ -437,7 +484,7 @@ def generate_response(question: str, chat_id=None, ground_truth=None):
             "contexts": [context.strip()],
             "ground_truth": clean_ground_truth(ground_truth)
         }
-        # evaluate_and_store(sample)
+        evaluate_and_store(sample)
 
     return {
         "response_short": response_short,
