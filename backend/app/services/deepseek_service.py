@@ -23,6 +23,7 @@ from better_profanity import profanity
 from google import genai
 import logging
 from bert_score import score as bert_score
+from app.models.chat_model import ChatModel
 
 profanity.load_censor_words()
 
@@ -418,10 +419,12 @@ def generate_response(question: str, chat_id=None, ground_truth=None):
     if not question or not isinstance(question, str) or len(question.strip()) < 3:
         return default_response("Invalid input.", "Please provide a clearer and more detailed question.")
 
-    # Step 1: Collect minimal, relevant chat history
+    # Step 1: Collect minimal, relevant chat history and preferences
     history_snippets = []
+    preferences = []
     if chat_id:
         try:
+            # Fetch chat history (last 6 messages)
             messages = MessageModel.collection.find({"chatId": ObjectId(chat_id)}).sort("timestamp", -1).limit(6)
             for msg in reversed(list(messages)):
                 role = msg.get("role", "User").capitalize()
@@ -429,18 +432,28 @@ def generate_response(question: str, chat_id=None, ground_truth=None):
                 message_text = content.get("response_short") if (role.lower() == "assistant" and isinstance(content, dict)) else str(content)
                 if message_text.strip():
                     history_snippets.append(f"{role}: {message_text.strip()}")
+
+            # Fetch preferences for the given chat
+            chat = ChatModel.collection.find_one({"_id": ObjectId(chat_id)})
+            if chat and "preferences" in chat:
+                preferences = chat["preferences"]
+
         except Exception as e:
             print(f"[History Fetch Error] {e}")
 
     short_history = "\n".join(history_snippets[-3:])  # Only last 3 entries for brevity
+    short_preferences = "\n".join(preferences)  # Joining preferences for use in context
 
-    # Step 2: Rewrite question using minimal history
+    # Step 2: Rewrite question using minimal history and preferences
     rewrite_prompt = f"""You are an assistant helping users with insurance-related queries.
 
-    Given the minimal chat history and the user's question, rewrite it to be clear and specific.
+    Given the minimal chat history, user preferences, and the user's question, rewrite it to be clear and specific.
 
-    Chat:
+    Chat History:
     {short_history}
+
+    User Preferences:
+    {short_preferences}
 
     User Question: {question}
 
@@ -457,12 +470,15 @@ def generate_response(question: str, chat_id=None, ground_truth=None):
         tone = "briefly" if mode == "short" else "in detail"
         return f"""You are a helpful and professional assistant specializing in insurance.
 
-    Answer the user's question {tone} using the context and chat history provided.
+    Answer the user's question {tone} using the context, chat history, and preferences provided.
 
     ⚠️ If the question is inappropriate, offensive, unrelated to insurance, or asks for content that is harmful, illegal, or unethical — politely decline to answer.
 
-    Chat:
+    Chat History:
     {short_history}
+
+    Preferences:
+    {short_preferences}
 
     Context: {context}
 
@@ -490,7 +506,6 @@ def generate_response(question: str, chat_id=None, ground_truth=None):
         "response_short": response_short,
         "response_detailed": response_detailed
     }
-
 
 
 def run_ollama(prompt):

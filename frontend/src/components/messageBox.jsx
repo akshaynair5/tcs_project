@@ -2,8 +2,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import userImage from "../assets/user.png";
 import assistantImage from "../assets/bot.png";
 import ReactMarkdown from 'react-markdown';
+import axios from 'axios'; // Assuming axios is used for API calls
 
-const MessageBox = ({ content, role }) => {
+const MessageBox = ({ content, role, chatId, messageId, userId }) => {
   const isUser = role === "user";
   const isAssistant = role === "assistant" || role === "ai_assistant" || role === "system";
 
@@ -13,6 +14,7 @@ const MessageBox = ({ content, role }) => {
 
   const [showDetailed, setShowDetailed] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [liked, setLiked] = useState(false); // Track if the message is liked
   const utteranceRef = useRef(null);
 
   const messageText = isToggleContent
@@ -51,6 +53,22 @@ const MessageBox = ({ content, role }) => {
     };
   }, []);
 
+  // Handle liking the message and updating the preference in the backend
+  const handleLikeMessage = async () => {
+    if (liked) return; // Prevent multiple likes
+    console.log(userId, chatId, messageId);
+    try {
+      await axios.post(`http://127.0.0.1:5000/api/user/${userId}/chat/${chatId}/like-message`, {
+        message_id: messageId,
+        content: messageText,
+      });
+
+      setLiked(true); // Mark as liked
+    } catch (error) {
+      console.error("Error liking message", error);
+    }
+  };
+
   return (
     <div className={`flex text-left gap-3 w-[75vw] ${isUser ? "flex-row-reverse items-end" : "items-start"} animate-fade-in`}>
       <img
@@ -66,7 +84,7 @@ const MessageBox = ({ content, role }) => {
         >
           <ReactMarkdown>{messageText}</ReactMarkdown>
         </div>
-        
+
         {/* Button Container */}
         {isAssistant && (
           <div className="flex gap-3 ml-2">
@@ -83,6 +101,14 @@ const MessageBox = ({ content, role }) => {
               className="text-xs text-green-600 hover:underline"
             >
               {isSpeaking ? "Stop Reading" : "Read Aloud"}
+            </button>
+            {/* Like button only for assistant messages */}
+            <button
+              onClick={handleLikeMessage}
+              className={`text-xs ${liked ? "text-gray-500" : "text-yellow-500"} hover:underline`}
+              disabled={liked}
+            >
+              {liked ? "👍 Liked" : "👍 Like"}
             </button>
           </div>
         )}

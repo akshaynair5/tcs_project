@@ -1,5 +1,7 @@
-from flask import jsonify, request
+from flask import Blueprint, request, jsonify
 from ..models.user_model import UserModel
+from ..models.chat_model import ChatModel
+from app.services.deepseek_service import run_ollama
 
 class UserController:
     @staticmethod
@@ -104,3 +106,29 @@ class UserController:
             "createdAt": user["createdAt"]
         }), 200
 
+    def like_message(user_id, chat_id):
+        data = request.json
+        message_id = data.get("message_id")
+        liked_content = data.get("content")  # Content that the user liked
+
+        # Define the prompt to extract positive points based on the liked content
+        prompt = f"""
+        Given the user's liked message, identify the key positive aspects, useful information, or points that the user might have appreciated in the content. Only highlight the most relevant and positive details.
+
+        User liked content:
+        {liked_content}
+
+        Key positive points or preferences (summarized as a single string):
+        """
+
+        # Generate the preference string from the model
+        preference_string = run_ollama(prompt).strip()
+
+        # If the preference string is empty or not useful, set a default or neutral response
+        if not preference_string:
+            preference_string = "User appreciates helpful and clear information."
+
+        # Update preferences in the ChatModel
+        ChatModel.update_preferences(chat_id, preference_string)
+
+        return {"message": "Preference updated successfully."}, 200
