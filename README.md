@@ -1,5 +1,4 @@
 
-````markdown
 # 🛡️ PolicyPal – An Insurance ChatBot
 
 **PolicyPal** is an AI-powered insurance chatbot that enables users to interact with complex policy documents using natural language. Designed to handle unstructured data like PDFs and scanned images, it provides fast, reliable answers with contextual accuracy by leveraging a Neo4j knowledge graph and a Retrieval-Augmented Generation (RAG) pipeline powered by LLMs.
