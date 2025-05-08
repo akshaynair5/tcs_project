@@ -116,9 +116,3 @@ python app.py
 ## 🙏 Acknowledgements
 
 This project was developed as part of a TCS internship by **Akshay Nair** and **Akshay Reddy**, under the guidance of **Vasantha Priya Sachithanandan**.
-
-
----
-
-Would you like me to generate a project logo, architecture diagram, or upload a sample `.env` file too?
-```
