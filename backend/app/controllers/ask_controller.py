@@ -31,7 +31,7 @@ class AskController:
             user_message_id = MessageModel.add_message(chat_id, user_id, question, "user")
 
             try:
-                response_text = generate_response(question)
+                response_text = generate_response(question, chat_id)
             except Exception as e:
                 logging.error(f"AI Model Error: {str(e)}")
                 return jsonify({"error": "AI response generation failed. Please try again later."}), 500

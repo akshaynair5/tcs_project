@@ -10,7 +10,7 @@ const Navbar = () => {
     <nav className="fixed top-0 left-0 w-full h-[10vh] bg-[#1a1a1e] text-white flex items-center px-6 shadow-md z-20">
       <div className="container mx-auto flex justify-between items-center">
         <Link className="text-2xl font-semibold tracking-wide hover:text-gray-300 transition" to="/">
-          Chat
+          PolicyPal
         </Link>
 
         <div className="flex items-center gap-4">

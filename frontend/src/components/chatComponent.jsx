@@ -1,7 +1,6 @@
 import { useContext, useEffect, useState, useRef } from "react";
 import MessageBox from "./messageBox";
 import ChatInput from "./chatBar";
-import FileUpload from "./fileUpload";
 import { AuthContext } from "../contextProvider";
 import axios from "axios";
 import { motion } from "framer-motion";
@@ -10,7 +9,9 @@ const ChatComponent = () => {
   const { currentUser, currentChat } = useContext(AuthContext);
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [searchQuery, setSearchQuery] = useState(""); // ✨ NEW
   const messagesEndRef = useRef(null);
+  const messageRefs = useRef([]); // To store references to each message
   const abortRef = useRef(null);
 
   useEffect(() => {
@@ -27,13 +28,12 @@ const ChatComponent = () => {
 
   const handleSend = async (input) => {
     if (!input.trim()) return;
-  
+
     const tempId = Date.now().toString();
     const newMessage = { content: input, role: "user", id: tempId };
     setMessages((prev) => [...prev, newMessage]);
     setLoading(true);
-    
-    // Save abort controller and message id
+
     const controller = new AbortController();
     abortRef.current = { controller, id: tempId };
 
@@ -47,7 +47,7 @@ const ChatComponent = () => {
         },
         { signal: controller.signal }
       );
-  
+
       const assistantMessage = { content: data.answer, role: "ai_assistant" };
       setMessages((prev) => [...prev, assistantMessage]);
     } catch (error) {
@@ -61,19 +61,17 @@ const ChatComponent = () => {
         setMessages((prev) => [...prev, errorMessage]);
       }
     }
-  
+
     setLoading(false);
   };
 
-
   const handleCancel = async () => {
     setLoading(false);
-  
+
     setMessages((prevMessages) => {
       const updatedMessages = [...prevMessages];
       const lastMessage = updatedMessages.pop(); // Remove last message
-  
-      // Delete from DB if _id exists
+
       if (lastMessage && lastMessage._id) {
         axios
           .delete(`http://localhost:5000/api/messages/${lastMessage._id}`)
@@ -81,35 +79,79 @@ const ChatComponent = () => {
             console.error("Failed to delete message from DB:", err);
           });
       }
-  
+
       return updatedMessages;
     });
   };
 
+  // ✨ NEW: Filter messages based on search query
+  const filteredMessages = messages.filter((msg) => {
+    let textContent = "";
+
+    if (msg.role === "user" && typeof msg.content === "string") {
+      textContent = msg.content;
+    } else if (msg.role === "ai_assistant" && typeof msg.content === "object") {
+      textContent = msg.content.response_short || "";
+    }
+
+    return textContent.toLowerCase().includes(searchQuery.toLowerCase());
+  });
+
+  // Function to handle scroll to a specific message
+  const handleScrollToMessage = (index) => {
+    if (messageRefs.current[index]) {
+      messageRefs.current[index].scrollIntoView({ behavior: "smooth" });
+    }
+  };
+
+  // Clear the search and reset the filtered messages after clicking a message
+  const handleMessageClick = (index) => {
+    setSearchQuery(""); // Clear the search query when a message is clicked
+    handleScrollToMessage(index); // Scroll to the clicked message
+  };
+
   return (
     <div className="flex flex-col fixed left-[20vw] top-[10vh] w-[80vw] h-[90vh] bg-[#1a1a1e] px-4 pt-4 pb-24 overflow-y-auto">
+
+      {/* ✨ Search Input */}
+      <div className="mb-4">
+        <input
+          type="text"
+          placeholder="Search messages..."
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          className="w-full p-2 rounded bg-[#2a2a2e] text-white placeholder-gray-400"
+        />
+      </div>
+
       {/* Message Area */}
       <div className="flex flex-col gap-4 overflow-y-auto text-white">
-        {messages.map((msg, index) => (
+        {filteredMessages.map((msg, index) => (
           <motion.div
             key={index}
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.25 }}
           >
-            <MessageBox content={msg.content} role={msg.role} />
+            {/* Dummy div around MessageBox */}
+            <div
+              ref={(el) => (messageRefs.current[index] = el)} // Ref attached to the dummy div
+              onClick={() => handleMessageClick(index)} // Reset search and scroll to message
+            >
+              <MessageBox
+                content={msg.content}
+                role={msg.role}
+                chatId={currentChat._id}
+                messageId={msg._id}
+                userId={currentUser.user_id}
+              />
+            </div>
           </motion.div>
         ))}
 
         {loading && (
           <div className="text-center text-sm text-gray-400 animate-pulse">
-            Typing...{" "}
-            {/* <button
-              onClick={handleCancel}
-              className="ml-2 text-red-400 hover:text-red-600 underline"
-            >
-              Cancel
-            </button> */}
+            Typing...
           </div>
         )}
 
